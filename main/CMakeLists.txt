@@ -1,0 +1,27 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "display/bsp.c"
+        "net/wifi.c"
+        "net/irail.c"
+        "ui/ui.c"
+    INCLUDE_DIRS
+        "."
+        "display"
+        "net"
+        "ui"
+    PRIV_REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_client
+        esp-tls
+        mbedtls
+        json
+        esp_lcd
+        driver
+        esp_timer
+        esp_psram
+        lwip
+)

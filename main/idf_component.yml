@@ -1,0 +1,17 @@
+## Managed components pulled from the Espressif Component Registry.
+## Run `idf.py reconfigure` (or any build) to fetch into ./managed_components/.
+dependencies:
+  idf:
+    version: ">=5.3,<6.0"
+
+  # LVGL v9 — UI toolkit. Brand-style screens, themes, smooth scroll.
+  lvgl/lvgl:
+    version: "^9.2.2"
+
+  # ST7796 panel driver (i80/parallel + SPI). For our WT32-SC01 Plus we use i80.
+  espressif/esp_lcd_st7796:
+    version: "^1.2.1"
+
+  # FT5x06-family touch driver — handles FT6336U on the WT32-SC01 Plus.
+  espressif/esp_lcd_touch_ft5x06:
+    version: "^1.0.6"
