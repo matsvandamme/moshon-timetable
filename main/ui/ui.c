@@ -90,13 +90,20 @@ static lv_obj_t *s_header_mm   = NULL;
 static lv_obj_t *s_header_mode = NULL;   // shows "Vertrek" OR "Aankomst" — single title
 static lv_obj_t *s_header_wifi = NULL;
 static lv_obj_t *s_logo        = NULL;   // NMBS B-in-oval; clickable to toggle mode
-// Wi-Fi status overlay (full-screen). Hidden by default.
+// Wi-Fi status overlay (full-screen). Visible by default — the splash is
+// the FIRST thing the user sees at boot, before app_main even sets a message.
 static lv_obj_t *s_overlay       = NULL;
 static lv_obj_t *s_overlay_msg   = NULL;
 static lv_obj_t *s_overlay_sub1  = NULL;   // secondary line (e.g. AP SSID)
 static lv_obj_t *s_overlay_sub2  = NULL;   // secondary line (e.g. URL)
 static lv_obj_t *s_overlay_info  = NULL;   // bottom build-info panel
-static bool      s_overlay_visible = false;
+static bool      s_overlay_visible = true;  // matches initial state set in ui_build
+// Body container holding the 5 timetable rows. Tracked globally so the
+// overlay show/hide path can flip its HIDDEN flag atomically in the same
+// LVGL lock — this guarantees the timetable is NEVER on-screen while the
+// overlay is up, and that a transient empty body can never flash between
+// frames.
+static lv_obj_t *s_body          = NULL;
 static lv_obj_t *s_rows[N_ROWS] = {0};
 static via_state_t s_via_state[N_ROWS] = {0};
 static ui_mode_t s_mode = UI_MODE_DEPARTURES;
@@ -296,6 +303,24 @@ static int precompute_pages(const char *full, int num_stops,
     return pages;
 }
 
+// Force a full repaint of the active screen. Call after any major
+// transition (overlay shown/hidden, mode toggle, etc.) so the partial-
+// render path can't leave stale pixels from the previous frame behind.
+// Caller MUST already hold the LVGL lock.
+//
+// Two lv_refr_now calls: the first drains whatever dirty regions were
+// queued before this call, the second covers regions invalidated as a
+// side-effect of the first pass (e.g. styles transitioning under hidden
+// flags or freshly-shown widgets dirtying parent areas).
+static void ui_full_redraw_locked(void)
+{
+    if (!s_screen) return;
+    lv_obj_invalidate(s_screen);
+    lv_refr_now(NULL);
+    lv_obj_invalidate(s_screen);
+    lv_refr_now(NULL);
+}
+
 // Tap the NMBS B-logo to toggle Vertrek <-> Aankomst. Runs inside the LVGL
 // task which already holds the lock.
 static void on_logo_tap(lv_event_t *e)
@@ -304,6 +329,7 @@ static void on_logo_tap(lv_event_t *e)
     s_mode = (s_mode == UI_MODE_DEPARTURES) ? UI_MODE_ARRIVALS : UI_MODE_DEPARTURES;
     apply_header_title_locked();
     apply_render_locked();
+    ui_full_redraw_locked();   // wipe any Vertrek leftover before Aankomst lands
 }
 
 // 3-second hold anywhere on the screen wipes Wi-Fi credentials AND the
@@ -758,6 +784,12 @@ esp_err_t ui_build(void)
     // ---- BODY (5 stacked rows) ----
     lv_obj_t *body = plain_obj(s_screen, &st_screen_bg,
                                0, BODY_TOP, LCD_H_RES, BODY_H);
+    s_body = body;
+    // Start the body HIDDEN. The overlay is up at boot (covers the screen)
+    // and the body is only revealed by ui_hide_overlay once main.c has
+    // verified Wi-Fi + a successful iRail fetch. This guarantees the user
+    // never sees an empty or stale timetable, even for a single frame.
+    lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN);
     // Body is a big tap target, and we also flag each row clickable since
     // LVGL 9's click bubbling through opaque non-clickable children is
     // unreliable. Both paths invoke the same toggle handler.
@@ -840,7 +872,10 @@ esp_err_t ui_build(void)
         lv_label_set_text(s_overlay_info, info);
     }
     lv_obj_align(s_overlay_info, LV_ALIGN_BOTTOM_MID, 0, -8);
-    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
+    // Overlay starts VISIBLE — the splash is up from the very first paint,
+    // before app_main has even configured a message. This pairs with
+    // s_body starting HIDDEN to guarantee no timetable flash at boot.
+    lv_obj_move_foreground(s_overlay);
 
     // Page-flip timer for the via stops. Runs inside the LVGL task so it
     // already holds the lock — but we re-acquire defensively in the cb.
@@ -861,14 +896,14 @@ void ui_show_overlay(const char *message)
         // doesn't show leftover provisioning text.
         if (s_overlay_sub1) lv_label_set_text(s_overlay_sub1, "");
         if (s_overlay_sub2) lv_label_set_text(s_overlay_sub2, "");
+        // Hide the timetable body FIRST and in the same lock as showing
+        // the overlay, so the user can never see a stale row underneath a
+        // partly-painted overlay during a state transition.
+        if (s_body) lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_overlay);
         s_overlay_visible = true;
-        // Force a full-screen invalidate AND synchronously flush so the
-        // overlay actually replaces every pixel before this call returns
-        // — otherwise partial-render artefacts from prior frames can leak.
-        if (s_screen) lv_obj_invalidate(s_screen);
-        lv_refr_now(NULL);
+        ui_full_redraw_locked();
     }
     bsp_lvgl_unlock();
 }
@@ -887,11 +922,11 @@ void ui_show_provisioning(const char *ap_ssid, const char *url)
         if (s_overlay_sub2) {
             lv_label_set_text(s_overlay_sub2, url ? url : "");
         }
+        if (s_body) lv_obj_add_flag(s_body, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_overlay);
         s_overlay_visible = true;
-        if (s_screen) lv_obj_invalidate(s_screen);
-        lv_refr_now(NULL);
+        ui_full_redraw_locked();
     }
     bsp_lvgl_unlock();
 }
@@ -901,11 +936,12 @@ void ui_hide_overlay(void)
     if (!bsp_lvgl_lock(500)) return;
     if (s_overlay) {
         lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
+        // Reveal the body in the same lock so the populated timetable
+        // appears as a single atomic transition — no gap of empty screen
+        // or stale rows between overlay-hide and body-show.
+        if (s_body) lv_obj_clear_flag(s_body, LV_OBJ_FLAG_HIDDEN);
         s_overlay_visible = false;
-        // Same trick on the way out — invalidate + sync flush so the
-        // timetable underneath is fully redrawn before this returns.
-        if (s_screen) lv_obj_invalidate(s_screen);
-        lv_refr_now(NULL);
+        ui_full_redraw_locked();
     }
     bsp_lvgl_unlock();
 }
@@ -916,6 +952,7 @@ void ui_set_mode(ui_mode_t mode)
     s_mode = mode;
     apply_header_title_locked();
     apply_render_locked();
+    ui_full_redraw_locked();   // clean transition between Vertrek and Aankomst
     bsp_lvgl_unlock();
 }
 

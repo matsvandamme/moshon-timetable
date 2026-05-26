@@ -74,6 +74,12 @@ static esp_err_t fill_board(const char *arrdep, time_t from_time, irail_board_t 
 
     int tries = 0;
     time_t anchor = from_time;
+    // Track whether AT LEAST ONE underlying HTTP request actually succeeded
+    // (regardless of how many entries it yielded). Used to differentiate
+    // "iRail returned 0 trains right now" (valid, ESP_OK) from "couldn't
+    // reach iRail at all" (ESP_FAIL). The UI layer only authorises the
+    // timetable to appear when at least one fetch genuinely succeeded.
+    bool any_http_success = false;
 
     while (out->count < ROWS_TARGET && tries < PAGE_MAX_TRIES) {
         irail_board_t batch = {0};
@@ -81,6 +87,7 @@ static esp_err_t fill_board(const char *arrdep, time_t from_time, irail_board_t 
         // (it tends to return more results than an explicit future anchor).
         esp_err_t r = irail_fetch(arrdep, (tries == 0 ? 0 : anchor), &batch);
         if (r != ESP_OK) break;
+        any_http_success = true;
 
         size_t accepted_this_round = 0;
         for (size_t i = 0; i < batch.count && out->count < IRAIL_MAX_ENTRIES; i++) {
@@ -120,7 +127,7 @@ static esp_err_t fill_board(const char *arrdep, time_t from_time, irail_board_t 
         ESP_LOGI(TAG_APP, "paginated %s: %u future entries in %d fetches",
                  arrdep, (unsigned)out->count, tries);
     }
-    return ESP_OK;
+    return any_http_success ? ESP_OK : ESP_FAIL;
 }
 
 static void do_fetch(void)
@@ -174,73 +181,83 @@ static void do_fetch(void)
     }
 }
 
-// True iff iRail returned at least one entry (departure OR arrival). This is
-// the signal we use to dismiss the boot splash — Wi-Fi alone isn't enough,
-// the user wants to see the populated timetable before the overlay clears.
+// True iff iRail returned at least one entry on the most recent fetch.
+// This is the gate for revealing the timetable — Wi-Fi alone isn't enough,
+// the timetable only appears once a successful fetch has produced data.
 static bool boards_have_data(void)
 {
     return (s_deps_ok && s_deps.count > 0) ||
            (s_arrs_ok && s_arrs.count > 0);
 }
 
+// One-second state machine. Computes the desired overlay state from
+// (wifi_ok, last_fetch_succeeded, boards_have_data) and only transitions
+// the UI when the desired state differs from the current state — so the
+// overlay never re-paints redundantly each tick. The timetable body is
+// hidden any time the overlay is up (handled atomically inside
+// ui_show_overlay / ui_hide_overlay), so the user can never see an empty
+// or stale board behind a not-yet-fully-painted overlay.
 static void main_loop_task(void *arg)
 {
     time_t last_fetch = 0;
-    bool   was_connected = wifi_is_connected();
-    // Tracks whether we've ever managed to populate the boards. The boot
-    // splash is held until this flips true. After that, transient empty
-    // fetches don't re-show the splash — only an explicit Wi-Fi disconnect
-    // surfaces the "Verbinding hervatten..." overlay.
-    bool   splash_dismissed = false;
-
-    do_fetch();
-    last_fetch = time(NULL);
-    ui_set_boards(s_deps_ok ? &s_deps : NULL,
-                  s_arrs_ok ? &s_arrs : NULL);
-    if (!splash_dismissed && boards_have_data()) {
-        ui_hide_overlay();
-        splash_dismissed = true;
-    }
+    bool   was_wifi   = wifi_is_connected();
+    // overlay_up tracks the current on-screen state. Initialised to true
+    // because ui_build leaves the boot splash visible.
+    bool   overlay_up = true;
+    // Tracks the message currently displayed under the overlay, so we
+    // only re-call ui_show_overlay when the text needs to change.
+    const char *overlay_msg = "Verbinding maken...";
 
     while (1) {
         time_t now = time(NULL);
-        bool now_connected = wifi_is_connected();
+        bool wifi_ok = wifi_is_connected();
+        bool just_reconnected = (wifi_ok && !was_wifi);
+        was_wifi = wifi_ok;
 
-        // Wi-Fi state transitions drive the overlay. Only fire on EDGE so
-        // we don't redundantly re-show the overlay every tick while down.
-        if (now_connected && !was_connected) {
-            // Just (re)connected — force a fresh fetch. Overlay only drops
-            // once that fetch actually yields data (matching the boot
-            // splash semantic: connected != "ready to show the board").
-            ESP_LOGI(TAG_APP, "Wi-Fi reconnected");
+        // Fetch when: (a) we've never fetched, (b) wifi just came back, or
+        // (c) refresh period elapsed. All gated on wifi being up.
+        bool should_fetch = wifi_ok &&
+                            (last_fetch == 0 ||
+                             just_reconnected ||
+                             (now - last_fetch >= CONFIG_REFRESH_PERIOD_SECONDS));
+        if (should_fetch) {
             do_fetch();
             last_fetch = now;
+            // Push to the UI regardless — render_entry handles empty arrays
+            // gracefully and the body is hidden behind the overlay anyway
+            // until the data_ok gate flips below.
             ui_set_boards(s_deps_ok ? &s_deps : NULL,
                           s_arrs_ok ? &s_arrs : NULL);
-            if (boards_have_data()) {
-                ui_hide_overlay();
-                splash_dismissed = true;
-            }
-        } else if (!now_connected && was_connected) {
-            ESP_LOGW(TAG_APP, "Wi-Fi lost");
-            ui_show_overlay("Verbinding hervatten...");
-        }
-        was_connected = now_connected;
-
-        if (now - last_fetch >= CONFIG_REFRESH_PERIOD_SECONDS) {
-            do_fetch();
-            last_fetch = now;
-            ui_set_boards(s_deps_ok ? &s_deps : NULL,
-                          s_arrs_ok ? &s_arrs : NULL);
-            // If we never made it past the boot splash, every subsequent
-            // refresh is another chance to dismiss it.
-            if (!splash_dismissed && boards_have_data()) {
-                ui_hide_overlay();
-                splash_dismissed = true;
-            }
         }
 
-        ui_tick_status(now_connected);
+        // Desired state: timetable only visible when wifi is associated AND
+        // the most recent fetch actually returned at least one entry.
+        bool show_timetable = wifi_ok && boards_have_data();
+
+        if (show_timetable) {
+            if (overlay_up) {
+                ui_hide_overlay();
+                overlay_up = false;
+                overlay_msg = NULL;
+            }
+        } else {
+            // Pick the right message for *why* we're hiding the timetable.
+            const char *new_msg;
+            if (!wifi_ok) {
+                new_msg = "Verbinding hervatten...";
+            } else if (last_fetch == 0) {
+                new_msg = "Verbinding maken...";
+            } else {
+                new_msg = "Treindata ophalen...";
+            }
+            if (!overlay_up || overlay_msg != new_msg) {
+                ui_show_overlay(new_msg);
+                overlay_up = true;
+                overlay_msg = new_msg;
+            }
+        }
+
+        ui_tick_status(wifi_ok);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
