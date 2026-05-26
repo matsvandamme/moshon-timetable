@@ -55,6 +55,7 @@ enum {
     SLOT_NEW_TIME,
     SLOT_DEST,
     SLOT_VEHICLE,
+    SLOT_PLAT_BOX,  // rounded outline around the platform number
     SLOT_PLAT,
     SLOT_TYPE,
     SLOT_NUMBER,    // train number (e.g. "2204") shown under the type badge
@@ -647,6 +648,7 @@ static lv_obj_t *build_row(lv_obj_t *parent, int idx)
     slots[SLOT_NEW_TIME]  = t_newt;
     slots[SLOT_DEST]      = t_dest;
     slots[SLOT_VEHICLE]   = t_vehicle;
+    slots[SLOT_PLAT_BOX]  = t_plat_box;
     slots[SLOT_PLAT]      = t_plat;
     slots[SLOT_TYPE]      = t_type;
     slots[SLOT_NUMBER]    = t_number;
@@ -741,6 +743,10 @@ static void render_entry(int row_idx, lv_obj_t *row, const irail_entry_t *e)
         vs->num_pages    = 0;
         lv_label_set_text(slots[SLOT_VEHICLE], e->vehicle);
     }
+    // Show the platform badge frame; clear_row hides it on empty rows so
+    // the user doesn't see a row of ghost rectangles where there's no
+    // train data.
+    lv_obj_clear_flag(slots[SLOT_PLAT_BOX], LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(slots[SLOT_PLAT], e->platform[0] ? e->platform : "?");
     lv_label_set_text(slots[SLOT_TYPE], e->type[0] ? e->type : "");
 
@@ -763,6 +769,7 @@ static void clear_row(int row_idx, lv_obj_t *row)
     lv_label_set_text(slots[SLOT_NEW_TIME], "");
     lv_label_set_text(slots[SLOT_DEST], "");
     lv_label_set_text(slots[SLOT_VEHICLE], "");
+    lv_obj_add_flag(slots[SLOT_PLAT_BOX], LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(slots[SLOT_PLAT], "");
     lv_label_set_text(slots[SLOT_TYPE], "");
     lv_label_set_text(slots[SLOT_NUMBER], "");
