@@ -18,10 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # wifi_secrets.h is gitignored — provide a placeholder so wifi.c compiles.
-      - name: Provision placeholder wifi_secrets.h
-        run: cp main/wifi_secrets.h.example main/wifi_secrets.h
-
       - name: ESP-IDF build (esp32s3)
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -41,16 +37,26 @@ jobs:
       - name: Take ownership of build dir
         run: sudo chown -R $USER:$USER build
 
+      # OTA partition layout (see firmware/partitions.csv):
+      #   0x0000   bootloader
+      #   0x8000   partition table
+      #   0xF000   otadata (NEW — required for esp_https_ota)
+      #   0x20000  ota_0 (initial app slot)
+      #   0x220000 ota_1 (alternate slot, blank at factory flash)
+      #
+      # We only ship ota_0 in the merged image; the bootloader populates
+      # otadata on first boot. After a successful esp_https_ota run the
+      # device flips otadata to point at ota_1 (or back).
       - name: Merge firmware images (single-file flash)
         working-directory: build
         run: |
           esptool.py --chip esp32s3 merge-bin \
             -o moshon_timetable-full.bin \
             --flash-mode dio --flash-freq 80m --flash-size 16MB \
-            0x0    bootloader/bootloader.bin \
-            0x8000 partition_table/partition-table.bin \
-            0x10000 moshon_timetable.bin
-          ls -lh moshon_timetable-full.bin
+            0x0      bootloader/bootloader.bin \
+            0x8000   partition_table/partition-table.bin \
+            0x20000  moshon_timetable.bin
+          ls -lh moshon_timetable-full.bin moshon_timetable.bin
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

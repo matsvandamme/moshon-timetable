@@ -10,6 +10,8 @@ idf_component_register(
         "net/irail.c"
         "net/irail_vehicle.c"
         "net/provision_ap.c"
+        "net/settings_web.c"
+        "net/weather.c"
         "stations_be.c"
         "ui/ui.c"
         "assets/nmbs_logo.c"
@@ -35,5 +37,7 @@ idf_component_register(
         esp_timer
         esp_psram
         esp_mm
+        esp_https_ota
+        app_update
         lwip
 )

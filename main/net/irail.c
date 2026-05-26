@@ -147,6 +147,29 @@ static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t 
     }
     out->count = 0;
     out->fetched_at = time(NULL);
+    out->alert_headline[0] = '\0';
+
+    // Top-level alerts block (when alerts=true was sent). Pull the first
+    // alert's headline for the on-screen banner. iRail returns it as
+    // either an object with `alert: [...]` or directly an array.
+    const cJSON *alerts_top = cJSON_GetObjectItemCaseSensitive(root, "alerts");
+    const cJSON *alerts_arr = NULL;
+    if (cJSON_IsObject(alerts_top)) {
+        alerts_arr = cJSON_GetObjectItemCaseSensitive(alerts_top, "alert");
+    } else if (cJSON_IsArray(alerts_top)) {
+        alerts_arr = alerts_top;
+    }
+    if (cJSON_IsArray(alerts_arr) && cJSON_GetArraySize(alerts_arr) > 0) {
+        const cJSON *first = cJSON_GetArrayItem(alerts_arr, 0);
+        const cJSON *hd = first ? cJSON_GetObjectItemCaseSensitive(first, "header") : NULL;
+        if (!cJSON_IsString(hd) || !hd->valuestring) {
+            hd = first ? cJSON_GetObjectItemCaseSensitive(first, "description") : NULL;
+        }
+        if (cJSON_IsString(hd) && hd->valuestring) {
+            strncpy(out->alert_headline, hd->valuestring, IRAIL_ALERT_LEN - 1);
+            transliterate_utf8(out->alert_headline);
+        }
+    }
 
     // Stash the queried station's canonical iRail id (e.g. BE.NMBS.0089...)
     // so the via-formatter can match against route stops by id, not by
@@ -257,11 +280,11 @@ static esp_err_t fetch(const char *arrdep, time_t for_time, irail_board_t *out)
                  (unsigned)(tm.tm_min  & 0x3F));
         snprintf(url, sizeof(url),
                  IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=%s"
-                 "&alerts=false&date=%s&time=%s",
+                 "&alerts=true&date=%s&time=%s",
                  st->query_name, arrdep, i18n_iso(), date_buf, time_buf);
     } else {
         snprintf(url, sizeof(url),
-                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=%s&alerts=false",
+                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=%s&alerts=true",
                  st->query_name, arrdep, i18n_iso());
     }
 

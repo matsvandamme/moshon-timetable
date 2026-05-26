@@ -25,6 +25,7 @@ The device is configured once over a built-in captive portal and runs unattended
 - [Quick start](#quick-start)
 - [The display](#the-display)
 - [Touch controls](#touch-controls)
+- [Web settings and updates](#web-settings-and-updates)
 - [Hardware](#hardware)
 - [Build from source](#build-from-source)
 - [Continuous integration](#continuous-integration)
@@ -35,12 +36,18 @@ The device is configured once over a built-in captive portal and runs unattended
 ## Features
 
 - **Live departures and arrivals** for any of the 714 NMBS / SNCB stations, refreshed every 45 seconds.
-- **Real-time delays and cancellations**, displayed with a red `+N'` badge and a revised time, or a grey strikethrough for cancelled trains.
-- **Synchronised via-stop cycling** across all rows, so multiple long itineraries are readable without clutter.
-- **Per-train fonts**: the destination name auto-shrinks to fit the column, so station names are never truncated mid-word.
-- **Multilingual user interface** in Dutch, French, English or German, selected during first-time setup.
-- **Data-freshness indicator** in the header: a small dot is green when the data is under one minute old, yellow up to two minutes, and red beyond that or after a failed fetch.
-- **Captive-portal setup**: no firmware rebuild is required to change Wi-Fi or station — long-press the screen for three seconds to start over.
+- **Real-time delays and cancellations** displayed with a red `+N'` badge and a revised time, or a grey strikethrough for cancelled trains.
+- **Service-disruption banner** under the header when iRail reports an active alert on the queried station's lines.
+- **Synchronised via-stop cycling** across all rows. Arrival rows show the full upcoming route through to the terminus; departure rows show the stops after your station.
+- **Per-train font scaling** so long destination names (Brussels-South, Antwerpen-Centraal, …) always fit on one line.
+- **Multilingual UI** in Dutch, French, English or German, selected during setup.
+- **Data-freshness traffic light** in the header: green ≤ 60 s, yellow up to 120 s, red beyond that or after a failed fetch.
+- **Night-time dimming** with a user-defined hour window (off by default).
+- **Optional weather chip** in the header (Open-Meteo, no API key).
+- **On-network settings page** reachable at `http://moshon-timetable.local/` once the device is on your Wi-Fi.
+- **Over-the-air firmware updates** from the settings page — no USB cable required after the first flash.
+- **Persistent via-stop cache** in NVS so the timetable populates instantly after a reboot.
+- **Captive-portal setup** for first boot; long-press the screen for three seconds to wipe and start over.
 
 ---
 
@@ -74,7 +81,7 @@ On first boot, or after a long-press reset, the device displays:
 3. Pick your display language, enter your home Wi-Fi credentials, and choose a station from the searchable list of all 714 NMBS / SNCB stations.
 4. Submit the form. The device reboots and joins your network.
 
-Subsequent boots go straight to the live timetable.
+Subsequent boots go straight to the live timetable. From then on, you can change any setting (or update the firmware) without re-running this dance — see [Web settings and updates](#web-settings-and-updates).
 
 ---
 
@@ -116,6 +123,21 @@ When a destination name exceeds the column width, the font scales down for that 
 | Single tap anywhere on the screen | Toggle between Departures and Arrivals. |
 | Single tap on the NMBS logo | Same as above. |
 | Press and hold for three seconds | Clear stored Wi-Fi and station settings, then reboot into the setup portal. |
+
+---
+
+## Web settings and updates
+
+Once the device has joined your Wi-Fi it advertises itself over mDNS as `moshon-timetable.local` and serves a settings page on port 80. Visiting it gives you:
+
+- The same form as the captive portal, **pre-filled** with your current values — so you can change just the station without re-typing your Wi-Fi password.
+- A **night-dim window** (display fully off between two hours, in local time).
+- Optional **weather coordinates** for the header chip. Leave both at 0 to hide it.
+- A **firmware update** button that pulls the latest GitHub release and installs it over the air. No USB cable, no esptool.
+
+If your network or router blocks mDNS, look up the device's IP in your router's client list (its DHCP hostname is `moshon-timetable`) and open it directly.
+
+> **Upgrading from v0.3.x or earlier?** Those builds shipped a `factory`-only partition table that doesn't support OTA. You need one more `esptool.py write_flash` from USB to switch to the OTA layout in v0.4.0+. After that, every update can be done from the web.
 
 ---
 

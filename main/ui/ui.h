@@ -40,6 +40,15 @@ void ui_tick_status(bool wifi_ok);
 // Pass last_success = 0 to force red regardless of clock. Call ~1 Hz.
 void ui_tick_freshness(time_t last_success_unix);
 
+// Set / clear the alert banner that overlays the bottom of the header
+// when iRail reports an active service disruption. Pass NULL or empty
+// string to clear.
+void ui_set_alert(const char *headline);
+
+// Set / clear the weather chip in the header. Pass weather_code < 0 to
+// hide. Temperature is shown to the nearest degree.
+void ui_set_weather(float temp_c, int weather_code);
+
 // Show / hide a full-screen overlay that obscures the board view. Used for
 // "Verbinding maken..." on first boot and "Verbinding hervatten..." after a
 // drop. `message` may be NULL to keep the previously-set text.

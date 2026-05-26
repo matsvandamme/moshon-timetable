@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,22 @@ esp_err_t cfg_erase_station(void);
 // by i18n_init(); written by the captive-portal /save handler.
 esp_err_t cfg_load_language(char *iso, size_t len);
 esp_err_t cfg_save_language(const char *iso);
+
+// ---------- Night-time dimming ----------
+
+// Display is fully off between dim_start_hour (inclusive) and
+// dim_end_hour (exclusive), in local time (Europe/Brussels). Defaults
+// to off-off (both 0), meaning the display is always on.
+// Hours are 0..23. Saving start == end disables the dim window.
+esp_err_t cfg_load_dim_hours(uint8_t *start_hour, uint8_t *end_hour);
+esp_err_t cfg_save_dim_hours(uint8_t start_hour, uint8_t end_hour);
+
+// ---------- Weather ----------
+
+// Optional latitude / longitude for the Open-Meteo header widget.
+// If neither is saved, the header just doesn't show weather.
+esp_err_t cfg_load_weather(float *lat, float *lon);
+esp_err_t cfg_save_weather(float lat, float lon);
 
 // ---------- Wipe everything ----------
 

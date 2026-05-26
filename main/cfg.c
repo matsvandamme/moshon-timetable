@@ -10,11 +10,15 @@
 #include "esp_log.h"
 #include <string.h>
 
-#define NS       "moshon"
-#define K_SSID   "wifi_ssid"
-#define K_PASS   "wifi_pass"
-#define K_STAT   "station"
-#define K_LANG   "language"
+#define NS         "moshon"
+#define K_SSID     "wifi_ssid"
+#define K_PASS     "wifi_pass"
+#define K_STAT     "station"
+#define K_LANG     "language"
+#define K_DIM_S    "dim_start"
+#define K_DIM_E    "dim_end"
+#define K_WX_LAT   "wx_lat"
+#define K_WX_LON   "wx_lon"
 
 static const char *TAG = "cfg";
 
@@ -151,6 +155,72 @@ esp_err_t cfg_save_language(const char *iso)
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     if (err == ESP_OK) ESP_LOGI(TAG, "saved language='%s'", iso);
+    return err;
+}
+
+esp_err_t cfg_load_dim_hours(uint8_t *start_hour, uint8_t *end_hour)
+{
+    if (!start_hour || !end_hour) return ESP_ERR_INVALID_ARG;
+    *start_hour = 0;
+    *end_hour = 0;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    uint8_t s = 0, e = 0;
+    nvs_get_u8(h, K_DIM_S, &s);
+    nvs_get_u8(h, K_DIM_E, &e);
+    nvs_close(h);
+    *start_hour = s;
+    *end_hour = e;
+    return ESP_OK;
+}
+
+esp_err_t cfg_save_dim_hours(uint8_t start_hour, uint8_t end_hour)
+{
+    if (start_hour > 23 || end_hour > 23) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, K_DIM_S, start_hour);
+    if (err == ESP_OK) err = nvs_set_u8(h, K_DIM_E, end_hour);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err == ESP_OK) ESP_LOGI(TAG, "saved dim window %02u:00 -> %02u:00",
+                                start_hour, end_hour);
+    return err;
+}
+
+esp_err_t cfg_load_weather(float *lat, float *lon)
+{
+    if (!lat || !lon) return ESP_ERR_INVALID_ARG;
+    *lat = 0.0f; *lon = 0.0f;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    uint32_t lat_u = 0, lon_u = 0;
+    esp_err_t e1 = nvs_get_u32(h, K_WX_LAT, &lat_u);
+    esp_err_t e2 = nvs_get_u32(h, K_WX_LON, &lon_u);
+    nvs_close(h);
+    if (e1 != ESP_OK || e2 != ESP_OK) return ESP_ERR_NVS_NOT_FOUND;
+    // Stored as IEEE-754 bits in u32 — nvs has no native float key.
+    memcpy(lat, &lat_u, sizeof(float));
+    memcpy(lon, &lon_u, sizeof(float));
+    return ESP_OK;
+}
+
+esp_err_t cfg_save_weather(float lat, float lon)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    uint32_t lat_u, lon_u;
+    memcpy(&lat_u, &lat, sizeof(uint32_t));
+    memcpy(&lon_u, &lon, sizeof(uint32_t));
+    err = nvs_set_u32(h, K_WX_LAT, lat_u);
+    if (err == ESP_OK) err = nvs_set_u32(h, K_WX_LON, lon_u);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err == ESP_OK) ESP_LOGI(TAG, "saved weather coords %.4f,%.4f", lat, lon);
     return err;
 }
 

@@ -94,6 +94,13 @@ static lv_obj_t *s_logo        = NULL;   // NMBS B-in-oval; clickable to toggle 
 // Small traffic-light dot indicating data freshness. Sits in the header
 // just left of the Wi-Fi indicator. Driven by ui_tick_freshness().
 static lv_obj_t *s_freshness_dot = NULL;
+// Weather chip in the header (small "12°" / "-3°" label). Hidden until
+// the user enters coordinates in the soft settings page.
+static lv_obj_t *s_weather_label = NULL;
+// Thin red alert bar that appears below the header when iRail reports a
+// service disruption. Hidden by default.
+static lv_obj_t *s_alert_bar  = NULL;
+static lv_obj_t *s_alert_text = NULL;
 // Wi-Fi status overlay (full-screen). Visible by default — the splash is
 // the FIRST thing the user sees at boot, before app_main even sets a message.
 static lv_obj_t *s_overlay       = NULL;
@@ -785,6 +792,28 @@ esp_err_t ui_build(void)
     lv_obj_set_style_border_width(s_freshness_dot, 0, 0);
     lv_obj_clear_flag(s_freshness_dot, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Weather chip — sits in the gap between the mode label and the
+    // freshness dot. Hidden until ui_set_weather() is called with a valid
+    // code. Plain off-white text in the same small font as the wifi
+    // indicator so it doesn't fight the clock for attention.
+    s_weather_label = lv_label_create(hdr);
+    lv_obj_remove_style_all(s_weather_label);
+    lv_obj_set_style_text_color(s_weather_label, NMBS_OFFWHITE, 0);
+    lv_obj_set_style_text_font(s_weather_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(s_weather_label, LCD_H_RES - 180, 14);
+    lv_label_set_text(s_weather_label, "");
+    lv_obj_add_flag(s_weather_label, LV_OBJ_FLAG_HIDDEN);
+
+    // Alert bar — full-width red strip under the header. The first line of
+    // the active iRail service alert scrolls inside it. Hidden by default.
+    s_alert_bar = plain_obj(s_screen, &st_delay_box,
+                            0, HEADER_H, LCD_H_RES, 18);
+    lv_obj_set_style_radius(s_alert_bar, 0, 0);
+    s_alert_text = label(s_alert_bar, &st_text_delay, "", 8, 2);
+    lv_obj_set_width(s_alert_text, LCD_H_RES - 16);
+    lv_label_set_long_mode(s_alert_text, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_add_flag(s_alert_bar, LV_OBJ_FLAG_HIDDEN);
+
     // Actual NMBS/SNCB van de Velde B-in-oval, rasterised from the official
     // SVG at compile time (firmware/main/assets/nmbs_logo.c). 56x36 ARGB8888.
     // Tap-to-toggle: the logo doubles as a Vertrek <-> Aankomst switch, with
@@ -980,6 +1009,56 @@ void ui_set_boards(const irail_board_t *deps, const irail_board_t *arrs)
     s_dep_board = deps;
     s_arr_board = arrs;
     apply_render_locked();
+    bsp_lvgl_unlock();
+}
+
+void ui_set_alert(const char *headline)
+{
+    if (!bsp_lvgl_lock(50)) return;
+    if (s_alert_bar && s_alert_text) {
+        if (headline && headline[0]) {
+            lv_label_set_text(s_alert_text, headline);
+            lv_obj_clear_flag(s_alert_bar, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_alert_bar);
+        } else {
+            lv_obj_add_flag(s_alert_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    bsp_lvgl_unlock();
+}
+
+// WMO weather codes: 0 clear, 1-3 partly cloudy, 45/48 fog, 51..67 drizzle/rain,
+// 71..77 snow, 80..82 showers, 85/86 snow showers, 95..99 thunder.
+// We only need a single-character glyph from the basic ASCII range that
+// Montserrat ships with — emoji isn't an option here.
+static char weather_glyph(int code)
+{
+    if (code <  0)                          return '?';
+    if (code == 0)                          return '*';   // sun
+    if (code >= 1  && code <= 3)            return '~';   // partly cloudy
+    if (code == 45 || code == 48)           return '=';   // fog
+    if (code >= 51 && code <= 67)           return '.';   // rain
+    if (code >= 71 && code <= 77)           return '#';   // snow
+    if (code >= 80 && code <= 82)           return '.';   // showers
+    if (code >= 85 && code <= 86)           return '#';   // snow showers
+    if (code >= 95)                         return '!';   // thunder
+    return '?';
+}
+
+void ui_set_weather(float temp_c, int weather_code)
+{
+    if (!bsp_lvgl_lock(50)) return;
+    if (s_weather_label) {
+        if (weather_code < 0) {
+            lv_obj_add_flag(s_weather_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%c %d", weather_glyph(weather_code),
+                     (int)(temp_c + (temp_c >= 0 ? 0.5f : -0.5f)));
+            lv_label_set_text(s_weather_label, buf);
+            lv_obj_clear_flag(s_weather_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     bsp_lvgl_unlock();
 }
 
