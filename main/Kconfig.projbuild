@@ -1,0 +1,73 @@
+menu "Moshon Timetable"
+
+    choice STATION_ACTIVE
+        prompt "Active NMBS station"
+        default STATION_AALTER
+        help
+            Which Belgian station's liveboard to show. Pick a preset or
+            choose CUSTOM and set STATION_CUSTOM_NAME below.
+
+        config STATION_AALTER
+            bool "Aalter"
+        config STATION_BRUSSELS_SOUTH
+            bool "Brussels-South / Bruxelles-Midi"
+        config STATION_BRUSSELS_CENTRAL
+            bool "Brussels-Central"
+        config STATION_BRUSSELS_NORTH
+            bool "Brussels-North"
+        config STATION_ANTWERPEN_CENTRAAL
+            bool "Antwerpen-Centraal"
+        config STATION_GENT_SINT_PIETERS
+            bool "Gent-Sint-Pieters"
+        config STATION_BRUGGE
+            bool "Brugge"
+        config STATION_OOSTENDE
+            bool "Oostende"
+        config STATION_LEUVEN
+            bool "Leuven"
+        config STATION_LIEGE_GUILLEMINS
+            bool "Liege-Guillemins"
+        config STATION_NAMUR
+            bool "Namur"
+        config STATION_CHARLEROI_SUD
+            bool "Charleroi-Sud"
+        config STATION_CUSTOM
+            bool "Custom (set name below)"
+    endchoice
+
+    config STATION_CUSTOM_NAME
+        string "Custom station name"
+        depends on STATION_CUSTOM
+        default "Aalter"
+        help
+            iRail-recognised station name (as returned by the
+            https://api.irail.be/stations/ endpoint's `name` field).
+
+    config REFRESH_PERIOD_SECONDS
+        int "Refresh period (seconds)"
+        range 15 600
+        default 45
+        help
+            How often to re-query the iRail liveboard. iRail asks clients
+            to be polite; 30-60 s is reasonable for a passenger display.
+
+    config BOARD_TOGGLE_SECONDS
+        int "Departures/Arrivals toggle period (seconds)"
+        range 5 60
+        default 12
+        help
+            The display alternates between the Vertrek (departures) and
+            Aankomst (arrivals) board, matching the real NMBS station
+            display style. This sets how long each side is shown.
+
+    config DEMO_MODE
+        bool "Demo mode (synthetic boards, no iRail polling)"
+        default n
+        help
+            When enabled, the device populates the boards with hardcoded,
+            realistic-looking trains (with delays, cancellations, accented
+            names, etc.) instead of hitting the iRail API. Useful for
+            showing the UI off without depending on real overnight
+            schedules. Wi-Fi still comes up so the clock can sync.
+
+endmenu

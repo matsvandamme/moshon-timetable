@@ -1,18 +1,14 @@
-// moshon-timetable — NMBS train timetable for Aalter station on WT32-SC01 Plus.
-//
-// Boot flow:
-//   1. NVS init
-//   2. Display + LVGL bring-up (bsp_init)
-//   3. UI skeleton (ui_build) so the user immediately sees branding
-//   4. Wi-Fi STA connect + SNTP
-//   5. Periodic worker: every REFRESH_PERIOD_MS, fetch departures + arrivals
-//      from iRail and update the LVGL boards.
+// moshon-timetable — NMBS train timetable (Vertrek + Aankomst) for the
+// active station, alternating like the real in-station NMBS boards.
 
 #include "app_config.h"
 #include "bsp.h"
 #include "ui.h"
 #include "wifi.h"
 #include "irail.h"
+#include "irail_vehicle.h"
+#include "stations.h"
+#include "demo.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -21,32 +17,201 @@
 #include "freertos/task.h"
 
 #include <time.h>
+#include <string.h>
+#include "esp_timer.h"
 
-static void refresh_task(void *arg)
+#define SPLASH_MIN_VISIBLE_MS  4000   // keep dev info readable even on fast Wi-Fi
+
+#ifndef CONFIG_BOARD_TOGGLE_SECONDS
+#define CONFIG_BOARD_TOGGLE_SECONDS 12
+#endif
+
+static irail_board_t s_deps;
+static irail_board_t s_arrs;
+static bool          s_deps_ok = false;
+static bool          s_arrs_ok = false;
+
+#define ROWS_TARGET     5         // matches N_ROWS in ui.c
+#define PAGE_GAP_SEC    60        // ask for "last_entry + 1 minute" next page
+#define PAGE_MAX_TRIES  4         // upper bound on extra HTTP calls per side
+
+// Append entries from `extra` to `out`, deduping on (scheduled, vehicle).
+static void merge_board(irail_board_t *out, const irail_board_t *extra)
 {
-    static irail_board_t deps;
-    static irail_board_t arrs;
+    for (size_t i = 0; i < extra->count && out->count < IRAIL_MAX_ENTRIES; i++) {
+        const irail_entry_t *e = &extra->entries[i];
+        bool dup = false;
+        for (size_t j = 0; j < out->count; j++) {
+            if (out->entries[j].scheduled == e->scheduled &&
+                strcmp(out->entries[j].vehicle, e->vehicle) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) out->entries[out->count++] = *e;
+    }
+}
+
+// Fetch `arrdep` and return the next ROWS_TARGET trains whose
+// scheduled-time + delay is STILL IN THE FUTURE relative to wall-clock now.
+//
+// Starts from `from_time` (0 = now), pages forward, jumps the anchor an hour
+// at a time if iRail returns nothing in a window (overnight lull). Caps at
+// PAGE_MAX_TRIES iterations so a permanently-empty station never spams iRail.
+//
+// Crucially: any iRail-returned entry with actual_time < now is filtered out
+// before we ever pass it to the UI, so the board can never show a past time.
+static esp_err_t fill_board(const char *arrdep, time_t from_time, irail_board_t *out)
+{
+    time_t now = time(NULL);
+    if (from_time == 0) from_time = now;
+
+    out->count = 0;
+    out->fetched_at = now;
+    out->for_time = from_time;
+
+    int tries = 0;
+    time_t anchor = from_time;
+
+    while (out->count < ROWS_TARGET && tries < PAGE_MAX_TRIES) {
+        irail_board_t batch = {0};
+        // First call: pass for_time=0 so iRail's "now" semantics kick in
+        // (it tends to return more results than an explicit future anchor).
+        esp_err_t r = irail_fetch(arrdep, (tries == 0 ? 0 : anchor), &batch);
+        if (r != ESP_OK) break;
+
+        size_t accepted_this_round = 0;
+        for (size_t i = 0; i < batch.count && out->count < IRAIL_MAX_ENTRIES; i++) {
+            const irail_entry_t *e = &batch.entries[i];
+            time_t actual = e->scheduled + (time_t)e->delay_seconds;
+            if (actual < now) continue;  // already left / arrived — never show
+
+            bool dup = false;
+            for (size_t j = 0; j < out->count; j++) {
+                if (out->entries[j].scheduled == e->scheduled &&
+                    strcmp(out->entries[j].vehicle, e->vehicle) == 0) {
+                    dup = true; break;
+                }
+            }
+            if (!dup) {
+                out->entries[out->count++] = *e;
+                accepted_this_round++;
+            }
+        }
+
+        if (out->count >= ROWS_TARGET) break;
+
+        // Pick the next anchor: continue past the last entry we got, or — if
+        // the window was empty / fully in-the-past — leap forward an hour to
+        // skip dead time (e.g. 02:30 -> 03:30 -> 04:30 until trains appear).
+        if (batch.count > 0) {
+            time_t last = batch.entries[batch.count - 1].scheduled;
+            anchor = (last + PAGE_GAP_SEC > anchor) ? last + PAGE_GAP_SEC
+                                                    : anchor + 60 * 60;
+        } else {
+            anchor += 60 * 60;
+        }
+        tries++;
+    }
+
+    if (tries > 0) {
+        ESP_LOGI(TAG_APP, "paginated %s: %u future entries in %d fetches",
+                 arrdep, (unsigned)out->count, tries);
+    }
+    return ESP_OK;
+}
+
+static void do_fetch(void)
+{
+#ifdef CONFIG_DEMO_MODE
+    // Demo mode: skip iRail entirely, generate synthetic boards. Times are
+    // anchored at the current clock so things always look "now-ish".
+    time_t now = time(NULL);
+    demo_fill_departures(&s_deps, now);
+    demo_fill_arrivals  (&s_arrs, now);
+    s_deps_ok = true;
+    s_arrs_ok = true;
+    return;
+#endif
+
+    if (!wifi_is_connected()) return;
+
+    // fill_board paginates forward and filters past entries internally, so
+    // we no longer need a separate "tomorrow midnight" branch. Whether it's
+    // 14:00 or 02:28 AM, this returns the next ROWS_TARGET trains whose
+    // scheduled-or-delayed time is still in the future.
+    s_deps_ok = (fill_board("departure", 0, &s_deps) == ESP_OK);
+    s_arrs_ok = (fill_board("arrival",   0, &s_arrs) == ESP_OK);
+
+    if (!s_deps_ok && !s_arrs_ok) {
+        ESP_LOGW(TAG_APP, "Both fetches failed");
+    }
+
+    // Enrich each entry with its "via X, Y, Z" subtitle. The first refresh
+    // hits iRail per train; subsequent refreshes are mostly cache hits.
+    // Errors here are non-fatal — the row falls back to showing the vehicle
+    // code in the subtitle slot.
+    const char *origin = station_get_active()->display_name;
+    if (s_deps_ok) {
+        for (size_t i = 0; i < s_deps.count; i++) {
+            irail_vehicle_get_via(s_deps.entries[i].vehicle_id,
+                                  s_deps.entries[i].scheduled,
+                                  origin,
+                                  s_deps.entries[i].via,
+                                  sizeof(s_deps.entries[i].via));
+        }
+    }
+    if (s_arrs_ok) {
+        for (size_t i = 0; i < s_arrs.count; i++) {
+            irail_vehicle_get_via(s_arrs.entries[i].vehicle_id,
+                                  s_arrs.entries[i].scheduled,
+                                  origin,
+                                  s_arrs.entries[i].via,
+                                  sizeof(s_arrs.entries[i].via));
+        }
+    }
+}
+
+static void main_loop_task(void *arg)
+{
+    time_t last_fetch = 0;
+    bool   was_connected = wifi_is_connected();
+
+    do_fetch();
+    last_fetch = time(NULL);
+    ui_set_boards(s_deps_ok ? &s_deps : NULL,
+                  s_arrs_ok ? &s_arrs : NULL);
 
     while (1) {
-        if (wifi_is_connected()) {
-            time_t now = 0;
+        time_t now = time(NULL);
+        bool now_connected = wifi_is_connected();
 
-            esp_err_t r1 = irail_fetch_departures(&deps);
-            esp_err_t r2 = irail_fetch_arrivals(&arrs);
-
-            if (r1 == ESP_OK || r2 == ESP_OK) {
-                now = time(NULL);
-                ui_update_boards(r1 == ESP_OK ? &deps : NULL,
-                                 r2 == ESP_OK ? &arrs : NULL);
-                ui_update_status(true, now);
-            } else {
-                ESP_LOGW(TAG_APP, "Both fetches failed");
-                ui_update_status(true, now);
-            }
-        } else {
-            ui_update_status(false, 0);
+        // Wi-Fi state transitions drive the overlay. Only fire on EDGE so
+        // we don't redundantly re-show the overlay every tick while down.
+        if (now_connected && !was_connected) {
+            // Just (re)connected — drop the overlay and force a fresh fetch
+            // so the user sees up-to-date data right away.
+            ESP_LOGI(TAG_APP, "Wi-Fi reconnected");
+            ui_hide_overlay();
+            do_fetch();
+            last_fetch = now;
+            ui_set_boards(s_deps_ok ? &s_deps : NULL,
+                          s_arrs_ok ? &s_arrs : NULL);
+        } else if (!now_connected && was_connected) {
+            ESP_LOGW(TAG_APP, "Wi-Fi lost");
+            ui_show_overlay("Verbinding hervatten...");
         }
-        vTaskDelay(pdMS_TO_TICKS(REFRESH_PERIOD_MS));
+        was_connected = now_connected;
+
+        if (now - last_fetch >= CONFIG_REFRESH_PERIOD_SECONDS) {
+            do_fetch();
+            last_fetch = now;
+            ui_set_boards(s_deps_ok ? &s_deps : NULL,
+                          s_arrs_ok ? &s_arrs : NULL);
+        }
+
+        ui_tick_status(now_connected);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -62,18 +227,32 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bsp_init());
     ESP_ERROR_CHECK(ui_build());
-    ui_update_status(false, 0);
+    ui_set_mode(UI_MODE_DEPARTURES);   // initial tab
+    ui_tick_status(false);
+
+    // Show the connect-to-Wi-Fi splash while we attempt association.
+    int64_t splash_started_us = esp_timer_get_time();
+    ui_show_overlay("Verbinding maken...");
 
     if (wifi_start_and_wait(20000) == ESP_OK) {
         time_sync_start();
-        // Give SNTP a moment to land a real time before the first fetch tries
-        // to label the refresh footer.
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(1500));   // let SNTP land before first fetch labels things
+        // Hold the splash on screen for at least SPLASH_MIN_VISIBLE_MS so a
+        // user can actually read the build info even when Wi-Fi joins fast.
+        int64_t elapsed_ms = (esp_timer_get_time() - splash_started_us) / 1000;
+        if (elapsed_ms < SPLASH_MIN_VISIBLE_MS) {
+            vTaskDelay(pdMS_TO_TICKS(SPLASH_MIN_VISIBLE_MS - (int)elapsed_ms));
+        }
+        ui_hide_overlay();                  // got Wi-Fi -> reveal the board
     } else {
-        ESP_LOGE(TAG_APP, "Wi-Fi did not come up in time — will keep retrying");
+        ESP_LOGE(TAG_APP, "Wi-Fi did not come up — task will keep retrying in background");
+        ui_show_overlay("Verbinding mislukt...");
     }
 
-    xTaskCreate(refresh_task, "refresh", 8 * 1024, NULL, 5, NULL);
+    // Pin the network/UI loop to core 1 alongside LVGL. CPU 0 stays free for
+    // Wi-Fi, lwIP and IDLE0, so the task watchdog doesn't trip during the
+    // multi-second mbedtls TLS handshakes against api.irail.be.
+    xTaskCreatePinnedToCore(main_loop_task, "loop", 8 * 1024, NULL, 3, NULL, 1);
 
-    ESP_LOGI(TAG_APP, "app_main done — handing off to tasks");
+    ESP_LOGI(TAG_APP, "app_main done");
 }

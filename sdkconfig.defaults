@@ -5,12 +5,15 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# --- Flash / PSRAM (WT32-S3-WROVER: 16MB QIO flash + 8MB octal PSRAM) ---
+# --- Flash / PSRAM (WT32-S3-WROVER: 16MB QIO flash + 8MB QUAD PSRAM) ---
+# NB: Wireless-Tag's WT32-S3-WROVER uses QSPI PSRAM (not OPI). Setting
+# SPIRAM_MODE_OCT here makes the ROM PSRAM probe return 0x00000000 and
+# the chip aborts during early boot. Stay on QUAD.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
@@ -36,6 +39,15 @@ CONFIG_ESP_TLS_USING_MBEDTLS=y
 # --- HTTP client ---
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 
+# --- Hardware crypto acceleration ---
+# Without these the RSA work in the TLS handshake against api.irail.be takes
+# several seconds and trips the task watchdog. The ESP32-S3 has hardware MPI
+# (big-number) and SHA accelerators; turning them on drops handshake time to
+# a few hundred ms.
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HARDWARE_AES=y
+
 # --- Wi-Fi tuning (small AP / typical home networks) ---
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
@@ -46,12 +58,30 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y
 
+# --- Task watchdog: 15s is plenty for any single iRail HTTPS round-trip
+# even on a slow uplink. Default 5s spams the console during the handshake.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+
 # --- Main task stack (LVGL + http use a lot) ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # --- LCD / RGB color depth: 16bpp for LVGL RGB565 ---
+# Do NOT set LV_COLOR_16_SWAP for ST7796 over esp_lcd i80 8-bit; the panel
+# I/O layer already serialises bytes in the order the panel wants, and an
+# extra swap turns navy into olive/green and yellow into magenta.
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_COLOR_16_SWAP=y
+# CONFIG_LV_COLOR_16_SWAP is not set
+
+# --- Moshon Timetable defaults (see main/Kconfig.projbuild) ---
+CONFIG_STATION_AALTER=y
+CONFIG_REFRESH_PERIOD_SECONDS=45
+
+# --- LVGL allocator: route via libc malloc -> ESP-IDF heap (incl. PSRAM)
+# instead of LVGL's static 64KB TLSF pool. With FULL render mode + the
+# embedded NMBS logo asset + all the styles, the small pool overflows
+# and TLSF block_absorb loops forever (hangs ui_build()'s styles_init).
+CONFIG_LV_USE_BUILTIN_MALLOC=n
+CONFIG_LV_USE_CLIB_MALLOC=y
 
 # --- LVGL fonts we use ---
 CONFIG_LV_FONT_MONTSERRAT_14=y

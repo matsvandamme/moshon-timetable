@@ -1,15 +1,20 @@
 idf_component_register(
     SRCS
         "main.c"
+        "demo.c"
+        "stations.c"
         "display/bsp.c"
         "net/wifi.c"
         "net/irail.c"
+        "net/irail_vehicle.c"
         "ui/ui.c"
+        "assets/nmbs_logo.c"
     INCLUDE_DIRS
         "."
         "display"
         "net"
         "ui"
+        "assets"
     PRIV_REQUIRES
         nvs_flash
         esp_wifi

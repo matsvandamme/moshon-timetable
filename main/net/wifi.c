@@ -6,7 +6,7 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-#include "esp_sntp.h"
+#include "esp_netif_sntp.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -59,7 +59,18 @@ esp_err_t wifi_start_and_wait(uint32_t timeout_ms)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+
+    // Set the DHCP hostname so the device is easy to spot in the router's
+    // client list. Must happen AFTER esp_netif_create_default_wifi_sta()
+    // (the netif must exist) and BEFORE the DHCP DISCOVER goes out (i.e.
+    // before esp_wifi_connect()). Uses APP_NAME = "moshon-timetable".
+    if (sta_netif) {
+        esp_err_t hn = esp_netif_set_hostname(sta_netif, APP_NAME);
+        if (hn != ESP_OK) {
+            ESP_LOGW(TAG_WIFI, "set_hostname failed: %s", esp_err_to_name(hn));
+        }
+    }
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));

@@ -1,5 +1,6 @@
 #include "irail.h"
 #include "app_config.h"
+#include "stations.h"
 
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -41,6 +42,59 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         default: break;
     }
     return ESP_OK;
+}
+
+// ---------- UTF-8 -> ASCII accent transliteration ----------
+// LVGL's built-in Montserrat fonts only ship glyphs 0x20-0x7E; anything outside
+// that (e.g. "Liège-Guillemins") renders as an empty box. Until we bundle a
+// font with extended Latin support, transliterate common Latin-1 accented
+// characters (UTF-8 lead byte 0xC2 or 0xC3) to plain ASCII in place.
+static void transliterate_utf8(char *s)
+{
+    if (!s) return;
+    static const struct { uint8_t b1, b2; char ascii; } map[] = {
+        // 0xC3 ...
+        {0xC3,0x80,'A'},{0xC3,0x81,'A'},{0xC3,0x82,'A'},{0xC3,0x83,'A'},
+        {0xC3,0x84,'A'},{0xC3,0x85,'A'},{0xC3,0x87,'C'},
+        {0xC3,0x88,'E'},{0xC3,0x89,'E'},{0xC3,0x8A,'E'},{0xC3,0x8B,'E'},
+        {0xC3,0x8C,'I'},{0xC3,0x8D,'I'},{0xC3,0x8E,'I'},{0xC3,0x8F,'I'},
+        {0xC3,0x91,'N'},
+        {0xC3,0x92,'O'},{0xC3,0x93,'O'},{0xC3,0x94,'O'},{0xC3,0x95,'O'},{0xC3,0x96,'O'},
+        {0xC3,0x99,'U'},{0xC3,0x9A,'U'},{0xC3,0x9B,'U'},{0xC3,0x9C,'U'},
+        {0xC3,0xA0,'a'},{0xC3,0xA1,'a'},{0xC3,0xA2,'a'},{0xC3,0xA3,'a'},
+        {0xC3,0xA4,'a'},{0xC3,0xA5,'a'},{0xC3,0xA7,'c'},
+        {0xC3,0xA8,'e'},{0xC3,0xA9,'e'},{0xC3,0xAA,'e'},{0xC3,0xAB,'e'},
+        {0xC3,0xAC,'i'},{0xC3,0xAD,'i'},{0xC3,0xAE,'i'},{0xC3,0xAF,'i'},
+        {0xC3,0xB1,'n'},
+        {0xC3,0xB2,'o'},{0xC3,0xB3,'o'},{0xC3,0xB4,'o'},{0xC3,0xB5,'o'},{0xC3,0xB6,'o'},
+        {0xC3,0xB9,'u'},{0xC3,0xBA,'u'},{0xC3,0xBB,'u'},{0xC3,0xBC,'u'},
+        {0xC3,0xBF,'y'},
+    };
+    unsigned char *r = (unsigned char *)s;
+    unsigned char *w = (unsigned char *)s;
+    while (*r) {
+        if (*r == 0xC3 && r[1]) {
+            char repl = '?';
+            for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++) {
+                if (r[0] == map[i].b1 && r[1] == map[i].b2) { repl = map[i].ascii; break; }
+            }
+            *w++ = (unsigned char)repl;
+            r += 2;
+        } else if (*r == 0xC2 && r[1]) {
+            // Latin-1 control chars / NBSP / etc. -> skip second byte, keep
+            // sensible ASCII fallback for the few printable ones.
+            *w++ = (r[1] == 0xA0) ? ' ' : '?';
+            r += 2;
+        } else if (*r >= 0x80) {
+            // Other multi-byte sequences we don't handle; drop one byte at a
+            // time and emit '?' so we never produce a partial sequence.
+            *w++ = '?';
+            r++;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
 }
 
 // ---------- Parser ----------
@@ -97,15 +151,36 @@ static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t 
         const cJSON *station = cJSON_GetObjectItemCaseSensitive(item, "station");
         if (cJSON_IsString(station) && station->valuestring) {
             strncpy(e->other_station, station->valuestring, IRAIL_FIELD_LEN - 1);
+            transliterate_utf8(e->other_station);
         }
 
         const cJSON *vehicle_info = cJSON_GetObjectItemCaseSensitive(item, "vehicleinfo");
         const char *short_name = NULL;
+        const char *type_str   = NULL;
+        const char *name_str   = NULL;   // canonical id like "BE.NMBS.IC1538"
         if (cJSON_IsObject(vehicle_info)) {
             short_name = json_str(vehicle_info, "shortname", NULL);
+            type_str   = json_str(vehicle_info, "type", NULL);
+            name_str   = json_str(vehicle_info, "name", NULL);
         }
         if (!short_name) short_name = json_str(item, "vehicle", "?");
         strncpy(e->vehicle, short_name, IRAIL_FIELD_LEN - 1);
+        transliterate_utf8(e->vehicle);
+        if (name_str && name_str[0]) {
+            strncpy(e->vehicle_id, name_str, IRAIL_VEHID_LEN - 1);
+        }
+
+        // Prefer explicit `type` field from vehicleinfo; else split shortname
+        // before the first space (e.g. "IC 1538" -> "IC", "S81 7234" -> "S81").
+        if (type_str && type_str[0]) {
+            strncpy(e->type, type_str, sizeof(e->type) - 1);
+        } else {
+            const char *space = strchr(short_name, ' ');
+            size_t type_len = space ? (size_t)(space - short_name) : strlen(short_name);
+            if (type_len > sizeof(e->type) - 1) type_len = sizeof(e->type) - 1;
+            memcpy(e->type, short_name, type_len);
+            e->type[type_len] = '\0';
+        }
 
         const char *plat = json_str(item, "platform", "?");
         strncpy(e->platform, plat, sizeof(e->platform) - 1);
@@ -118,17 +193,42 @@ static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t 
 
 // ---------- One liveboard fetch ----------
 
-static esp_err_t fetch(const char *arrdep, irail_board_t *out)
+static esp_err_t fetch(const char *arrdep, time_t for_time, irail_board_t *out)
 {
     char *buf = malloc(IRAIL_HTTP_BUF);
     if (!buf) return ESP_ERR_NO_MEM;
     buf[0] = '\0';
     http_sink_t sink = { .buf = buf, .cap = IRAIL_HTTP_BUF, .len = 0 };
 
-    char url[256];
-    snprintf(url, sizeof(url),
-             IRAIL_HOST_PATH "?id=%s&arrdep=%s&format=json&lang=en&alerts=false",
-             STATION_ID, arrdep);
+    // iRail accepts station= with the canonical name (any of nl/fr/en/de).
+    // It also handles URL-encoding of accents like "Liège-Guillemins" for us
+    // here via esp_http_client's URL parsing.
+    const station_t *st = station_get_active();
+    char url[320];
+    if (for_time > 0) {
+        // Specific date/time fetch. iRail wants date=ddmmyy & time=hhmm in
+        // local (Brussels) time; we already have TZ=CET via time_sync_start.
+        struct tm tm;
+        localtime_r(&for_time, &tm);
+        // GCC's -Werror=format-truncation can't prove tm_* fields are bounded,
+        // so use generously-sized buffers and clamped unsigneds.
+        char date_buf[16], time_buf[16];
+        snprintf(date_buf, sizeof(date_buf), "%02u%02u%02u",
+                 (unsigned)(tm.tm_mday & 0x3F),
+                 (unsigned)((tm.tm_mon + 1) & 0x0F),
+                 (unsigned)(tm.tm_year % 100));
+        snprintf(time_buf, sizeof(time_buf), "%02u%02u",
+                 (unsigned)(tm.tm_hour & 0x3F),
+                 (unsigned)(tm.tm_min  & 0x3F));
+        snprintf(url, sizeof(url),
+                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=en"
+                 "&alerts=false&date=%s&time=%s",
+                 st->query_name, arrdep, date_buf, time_buf);
+    } else {
+        snprintf(url, sizeof(url),
+                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=en&alerts=false",
+                 st->query_name, arrdep);
+    }
 
     esp_http_client_config_t http_cfg = {
         .url               = url,
@@ -166,8 +266,17 @@ static esp_err_t fetch(const char *arrdep, irail_board_t *out)
     ESP_LOGD(TAG_IRAIL, "Body %u bytes", (unsigned)sink.len);
     esp_err_t prc = parse_board(buf, strcmp(arrdep, "departure") == 0, out);
     free(buf);
+    if (prc == ESP_OK) {
+        out->for_time = for_time;
+        ESP_LOGI(TAG_IRAIL, "%s: parsed %u entries%s",
+                 arrdep, (unsigned)out->count,
+                 for_time > 0 ? " (scheduled fetch)" : "");
+    }
     return prc;
 }
 
-esp_err_t irail_fetch_departures(irail_board_t *out) { return fetch("departure", out); }
-esp_err_t irail_fetch_arrivals  (irail_board_t *out) { return fetch("arrival",   out); }
+esp_err_t irail_fetch(const char *arrdep, time_t for_time, irail_board_t *out)
+{ return fetch(arrdep, for_time, out); }
+
+esp_err_t irail_fetch_departures(irail_board_t *out) { return fetch("departure", 0, out); }
+esp_err_t irail_fetch_arrivals  (irail_board_t *out) { return fetch("arrival",   0, out); }

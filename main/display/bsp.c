@@ -43,8 +43,14 @@ static TaskHandle_t      s_lvgl_task  = NULL;
 #define LVGL_TASK_PRIO     2
 #define LVGL_TICK_PERIOD_MS  2
 
-// Two line-sized draw buffers in PSRAM. RGB565 = 2 bytes/pixel.
-// 60 lines * 480 px * 2 B = ~57 KB each, ~114 KB total — fine in 8 MB PSRAM.
+// PARTIAL render mode with 60-line draw buffers in PSRAM.
+// 60 lines * 480 px * 2 B = 57,600 bytes per buffer; 115 KB double-buffered.
+//
+// This is the last visually-stable buffer size on this hardware. Bumping
+// past it (100, 160, full-frame) consistently produced garbled output,
+// likely because of i80 DMA-descriptor / cache-line interactions when the
+// transfer size grows past a hardware threshold. The companion `max_transfer_bytes`
+// in the i80 bus config tracks this value so the two stay in lockstep.
 #define LVGL_DRAW_BUF_LINES  60
 #define LVGL_DRAW_BUF_BYTES  (LCD_H_RES * LVGL_DRAW_BUF_LINES * 2)
 
@@ -65,16 +71,22 @@ static bool IRAM_ATTR on_panel_io_color_trans_done(
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
-    int offsetx1 = area->x1;
-    int offsetx2 = area->x2;
-    int offsety1 = area->y1;
-    int offsety2 = area->y2;
-    // LV_COLOR_16_SWAP is set in sdkconfig — bytes already in panel order.
-    esp_lcd_panel_draw_bitmap(panel, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+    // ST7796 over esp_lcd i80 reads each 16-bit pixel as MSB-first, but LVGL
+    // emits little-endian uint16_t in memory. Without this swap, NMBS navy
+    // shows up as olive-green. Doing it in software here is more reliable
+    // than lv_display_set_color_format(LV_COLOR_FORMAT_RGB565_SWAPPED),
+    // which doesn't appear to take effect with this LVGL 9.2 + ESP-IDF combo.
+    int pixels = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    uint16_t *p = (uint16_t *)px_map;
+    for (int i = 0; i < pixels; i++) {
+        p[i] = (uint16_t)((p[i] >> 8) | (p[i] << 8));
+    }
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
+    static bool s_was_pressed = false;
     uint16_t x = 0, y = 0;
     uint8_t cnt = 0;
     esp_lcd_touch_read_data(s_touch_handle);
@@ -83,8 +95,14 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.x = x;
         data->point.y = y;
         data->state = LV_INDEV_STATE_PRESSED;
+        // Edge-triggered log so we see touch events without spamming the serial.
+        if (!s_was_pressed) {
+            ESP_LOGI(TAG_BSP, "touch press at (%u, %u)", x, y);
+            s_was_pressed = true;
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+        s_was_pressed = false;
     }
 }
 
@@ -185,7 +203,12 @@ static esp_err_t display_init(void)
             BSP_LCD_PIN_DATA4, BSP_LCD_PIN_DATA5, BSP_LCD_PIN_DATA6, BSP_LCD_PIN_DATA7,
         },
         .bus_width       = 8,
-        .max_transfer_bytes = LCD_H_RES * LVGL_DRAW_BUF_LINES * 2 + 16,
+        // Match the LVGL draw-buffer size exactly. The i80 bus pre-allocates
+        // DMA descriptors for transfers up to this size; if LVGL hands it a
+        // larger buffer the bus driver corrupts memory (the partial-render
+        // red band + scratch-marks at 100 lines and the LoadProhibited crash
+        // at full-screen both came from this mismatch).
+        .max_transfer_bytes = LVGL_DRAW_BUF_BYTES + 16,
         .psram_trans_align  = 64,
         .sram_trans_align   = 4,
     };
@@ -202,14 +225,19 @@ static esp_err_t display_init(void)
             .dc_dummy_level  = 0,
             .dc_data_level   = 1,
         },
-        .on_color_trans_done = on_panel_io_color_trans_done,
-        .user_ctx            = NULL,  // set later after display is created
+        // We register the done-callback later via
+        // esp_lcd_panel_io_register_event_callbacks() once the LVGL display
+        // exists. Leave inline fields NULL here so v5.x doesn't fire twice.
         .lcd_cmd_bits        = 8,
         .lcd_param_bits      = 8,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80_bus, &io_cfg, &s_io_handle));
 
     ESP_LOGI(TAG_BSP, "Init ST7796 panel");
+    // On the WT32-SC01 Plus the esp_lcd_st7796 driver's `rgb_ele_order`
+    // appears inverted vs the API name: passing RGB here makes the panel
+    // render with R and B channels swapped (navy -> brown, yellow -> cyan).
+    // Use BGR to get correct RGB ordering on the panel.
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = BSP_LCD_PIN_RST,
         .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
@@ -219,9 +247,18 @@ static esp_err_t display_init(void)
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel_handle));
-    // Landscape orientation: swap XY, mirror Y to match physical board.
+    // Landscape orientation. With swap_xy=true the panel's native X/Y are
+    // swapped, so `mirror_y` here corresponds to the user's left/right flip
+    // and `mirror_x` to top/bottom. Setting (mirror_x=true, mirror_y=true)
+    // puts (0,0) at the physical top-left for the WT32-SC01 Plus board
+    // (text reads left-to-right). If the board's ribbon ends up on the
+    // other side, drop one of the trues.
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel_handle, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel_handle, true, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel_handle, true, true));
+    // Empirically: this WT32-SC01 Plus panel is "normally inverted" — leaving
+    // invert_color OFF turns white into black on the LCD. Setting it ON sends
+    // the DINVON command which puts the panel into "normal" display mode for
+    // this hardware. Yes, the API name reads backwards on this board.
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel_handle, true));
 
@@ -249,15 +286,20 @@ static esp_err_t touch_init(void)
     esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_cfg, &tp_io_handle));
 
+    // Touch transform aligned to the display's swap_xy=true + mirror(1,1).
+    // Empirically: with both mirrors=1 on the touch panel, the FT6336
+    // returned Y values up to ~462 (i.e. unclamped raw Y instead of mapped
+    // landscape Y). Dropping both mirrors AND keeping swap_xy=1 lets the
+    // driver's clamping work and gives Y in the expected 0..319 range.
     esp_lcd_touch_config_t tp_cfg = {
         .x_max  = LCD_H_RES,
         .y_max  = LCD_V_RES,
         .rst_gpio_num = BSP_TOUCH_PIN_RST,
         .int_gpio_num = BSP_TOUCH_PIN_INT,
         .flags = {
-            .swap_xy = 1,
+            .swap_xy  = 1,
             .mirror_x = 0,
-            .mirror_y = 1,
+            .mirror_y = 0,
         },
     };
     ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &s_touch_handle));
@@ -286,8 +328,13 @@ static esp_err_t lvgl_init(void)
 
     s_display = lv_display_create(LCD_H_RES, LCD_V_RES);
     lv_display_set_flush_cb(s_display, lvgl_flush_cb);
+    // PARTIAL mode with 160-line double buffer (~307 KB total in PSRAM).
+    // Larger chunks than the original 60-line setup means fewer flush calls
+    // and far less chance of partial-render artifacts (red band, scratches).
     lv_display_set_buffers(s_display, buf1, buf2, LVGL_DRAW_BUF_BYTES, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_user_data(s_display, s_panel_handle);
+    // Byte swap to the panel is handled manually in lvgl_flush_cb above
+    // (LVGL 9.2's set_color_format(SWAPPED) was not effective here).
 
     // Wire the panel IO done-callback to flush_ready.
     esp_lcd_panel_io_callbacks_t cb = {

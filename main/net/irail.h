@@ -11,13 +11,18 @@ extern "C" {
 
 #define IRAIL_MAX_ENTRIES   12
 #define IRAIL_FIELD_LEN     48
+#define IRAIL_VEHID_LEN     32     // e.g. "BE.NMBS.IC2803"
+#define IRAIL_VIA_LEN       128    // pre-formatted "via X, Y, Z" subtitle
 
 typedef struct {
-    time_t   scheduled;            // absolute time (unix)
+    time_t   scheduled;                      // absolute time (unix)
     uint32_t delay_seconds;
     char     other_station[IRAIL_FIELD_LEN]; // destination for departures, origin for arrivals
-    char     vehicle[IRAIL_FIELD_LEN];       // e.g. "IC 1538"
+    char     vehicle[IRAIL_FIELD_LEN];       // full shortname, e.g. "IC 1538"
+    char     type[8];                        // class only, e.g. "IC", "S8", "P", "L"
     char     platform[8];                    // "1", "2A", "?"
+    char     vehicle_id[IRAIL_VEHID_LEN];    // for /vehicle/?id=... lookup
+    char     via[IRAIL_VIA_LEN];             // "via X, Y, Z" (filled async)
     bool     canceled;
     bool     left_or_arrived;
 } irail_entry_t;
@@ -26,12 +31,18 @@ typedef struct {
     irail_entry_t entries[IRAIL_MAX_ENTRIES];
     size_t        count;
     time_t        fetched_at;
+    time_t        for_time;   // 0 = "now"; else the absolute unix time we
+                              // asked iRail for (used by the overnight
+                              // fallback that requests tomorrow ~05:00).
 } irail_board_t;
 
-// Fetch the next departures from STATION_NAME (defined in app_config.h).
-esp_err_t irail_fetch_departures(irail_board_t *out);
+// Fetch the liveboard for the active station at a specific moment in time.
+// `for_time = 0` means "now" (iRail's default). `arrdep` is "departure" or
+// "arrival". The returned board's `for_time` field mirrors what was asked.
+esp_err_t irail_fetch(const char *arrdep, time_t for_time, irail_board_t *out);
 
-// Fetch the next arrivals at STATION_NAME.
+// Backwards-compat thin wrappers — both call irail_fetch(..., 0, ...).
+esp_err_t irail_fetch_departures(irail_board_t *out);
 esp_err_t irail_fetch_arrivals(irail_board_t *out);
 
 #ifdef __cplusplus
