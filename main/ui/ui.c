@@ -967,9 +967,9 @@ esp_err_t ui_build(void)
     // Page-flip timer for the via stops. Runs inside the LVGL task so it
     // already holds the lock — but we re-acquire defensively in the cb.
     lv_timer_create(marquee_tick, MARQUEE_INTERVAL_MS, NULL);
-    // 500 ms = colon flips every half-second so a full HH:MM:on -> off
-    // cycle is one second per the user's preference.
-    lv_timer_create(clock_tick_cb, 500, NULL);
+    // 1 s tick: colon stays on for one full second, then off for one full
+    // second — a 2-second full cycle, matching the user's preference.
+    lv_timer_create(clock_tick_cb, 1000, NULL);
 
     bsp_lvgl_unlock();
     return ESP_OK;
