@@ -127,6 +127,17 @@ static uint32_t json_uint_from_string_or_number(const cJSON *obj, const char *ke
 // iRail wraps fields like "time", "delay", "platform" as strings in JSON.
 // "departures": { "number":"N", "departure":[{...},{...}] }
 // "arrivals":   { "number":"N", "arrival":[{...},{...}] }
+// Latest queried-station ID extracted from a liveboard response's
+// top-level "stationinfo" block. Used to match the user's station inside
+// the route returned by /vehicle/ regardless of which language iRail
+// localised the stop names in.
+static char s_active_station_id[40] = {0};
+
+const char *irail_active_station_id(void)
+{
+    return s_active_station_id;
+}
+
 static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t *out)
 {
     cJSON *root = cJSON_Parse(json);
@@ -136,6 +147,19 @@ static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t 
     }
     out->count = 0;
     out->fetched_at = time(NULL);
+
+    // Stash the queried station's canonical iRail id (e.g. BE.NMBS.0089...)
+    // so the via-formatter can match against route stops by id, not by
+    // language-dependent name.
+    const cJSON *top_si = cJSON_GetObjectItemCaseSensitive(root, "stationinfo");
+    if (cJSON_IsObject(top_si)) {
+        const cJSON *id_j = cJSON_GetObjectItemCaseSensitive(top_si, "id");
+        if (cJSON_IsString(id_j) && id_j->valuestring) {
+            strncpy(s_active_station_id, id_j->valuestring,
+                    sizeof(s_active_station_id) - 1);
+            s_active_station_id[sizeof(s_active_station_id) - 1] = '\0';
+        }
+    }
 
     cJSON *section = cJSON_GetObjectItemCaseSensitive(root, is_departure ? "departures" : "arrivals");
     cJSON *arr     = section ? cJSON_GetObjectItemCaseSensitive(section,
