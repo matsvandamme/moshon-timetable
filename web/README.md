@@ -25,31 +25,38 @@ Any static file server works; we don't have a build step. iRail allows
 cross-origin requests, so the browser can call the API directly without
 a proxy.
 
-## Deploy to Cloudflare Pages
+## Deploy to Cloudflare (Workers Assets)
+
+Cloudflare merged "Pages" into the unified "Workers & Pages" flow, so
+the deploy now runs `wrangler deploy` against a `wrangler.toml` at the
+repo root. That file is already committed (`../wrangler.toml`) — it
+declares the project as static-assets-only and points at `web/public/`.
 
 1. Sign in to the [Cloudflare dashboard](https://dash.cloudflare.com/).
-2. **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
+2. **Workers & Pages** → **Create application** → **Import a repository**
+   (or **Connect to Git** depending on the dashboard version).
 3. Pick the `moshon-timetable` GitHub repo.
-4. Build settings:
-   - **Framework preset**: None
-   - **Build command**: *(leave empty)*
-   - **Build output directory**: `web/public`
-   - **Root directory (advanced)**: `/`
-5. Save and deploy.
+4. Cloudflare reads the committed `wrangler.toml` and shows a summary.
+   Leave the fields at their defaults:
+   - **Project name**: `moshon-timetable`
+   - **Production branch**: `main`
+   - **Build command**: *(empty)*
+   - **Deploy command**: `npx wrangler deploy` (Cloudflare's default)
+5. **Save and Deploy**.
 
-Cloudflare will redeploy on every push to `main`.
+Cloudflare redeploys automatically on every push to `main`. PR branches
+get preview URLs.
 
 ### Custom domain (timetable.moshon.be)
 
-1. In the Pages project, **Custom domains** → **Set up a custom domain**.
+1. In the project: **Settings** → **Domains & Routes** → **Add custom domain**.
 2. Enter `timetable.moshon.be`.
-3. If the parent domain `moshon.be` is **already on Cloudflare**, the DNS
-   record is created automatically — done.
-4. If `moshon.be` is hosted **elsewhere**, Cloudflare gives you a CNAME
-   value (something like `your-project.pages.dev`). Add it as a CNAME for
-   `timetable` at your DNS provider, then come back and click *Activate*.
-
-A free SSL certificate is provisioned automatically.
+3. If `moshon.be` is on Cloudflare DNS, the CNAME is created
+   automatically and SSL provisions in under a minute.
+4. If `moshon.be` is hosted elsewhere, Cloudflare shows you a target
+   value like `moshon-timetable.<your-subdomain>.workers.dev`. Add it
+   as a CNAME for `timetable` at your DNS provider, then come back and
+   verify.
 
 ## Routing
 
@@ -62,8 +69,10 @@ Pages routes:
 | `/brussel-zuid` | Brussel-Zuid board |
 | `/<slug>` | Any station whose name slugifies to `<slug>` |
 
-`_redirects` declares an SPA fallback so every path serves
-`index.html` and the in-browser router takes over.
+SPA fallback (so `/aalter` and friends route to `index.html`) is
+declared in `wrangler.toml`'s `not_found_handling = "single-page-application"`.
+The legacy `_redirects` file is retained for any future migration back to
+Pages-style hosting; both Pages and Workers Assets accept it.
 
 ## File layout
 

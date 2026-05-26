@@ -1,0 +1,19 @@
+# Cloudflare Workers Assets config for the timetable web app.
+#
+# Cloudflare has migrated from "Pages" projects to "Workers with assets".
+# This file tells `wrangler deploy` (which the dashboard runs for us on
+# every push) that the project is a static-assets-only Worker and where
+# to find the files.
+#
+# No build step, no Worker code — Cloudflare just serves web/public/ at
+# the edge with their CDN + free SSL.
+
+name = "moshon-timetable"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./web/public"
+# SPA fallback: any 404 (e.g. /aalter, /brussel-zuid) is served as
+# index.html so the in-browser router can take over. Same behaviour
+# the old _redirects file gave us under Pages.
+not_found_handling = "single-page-application"
