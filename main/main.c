@@ -311,7 +311,13 @@ void app_main(void)
     // Pin the network/UI loop to core 1 alongside LVGL. CPU 0 stays free for
     // Wi-Fi, lwIP and IDLE0, so the task watchdog doesn't trip during the
     // multi-second mbedtls TLS handshakes against api.irail.be.
-    xTaskCreatePinnedToCore(main_loop_task, "loop", 8 * 1024, NULL, 3, NULL, 1);
+    //
+    // Stack: 16 KB. The first liveboard fetch combines a fresh mbedtls TLS
+    // handshake (heavy stack usage) with build_via_page / render_entry which
+    // each push 2 * IRAIL_VIA_LEN bytes on the stack. With IRAIL_VIA_LEN at
+    // 256 those buffers are 512 bytes each and 8 KB overflows during the
+    // first fetch — confirmed via "***ERROR*** A stack overflow in task loop".
+    xTaskCreatePinnedToCore(main_loop_task, "loop", 16 * 1024, NULL, 3, NULL, 1);
 
     ESP_LOGI(TAG_APP, "app_main done");
 }
