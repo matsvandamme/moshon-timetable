@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
 #include "freertos/FreeRTOS.h"
@@ -29,7 +30,10 @@
 #include <stdlib.h>
 
 #define IRAIL_VEHICLE_HOST   "https://api.irail.be/v1/vehicle/"
-#define IRAIL_VEHICLE_BUF    (24 * 1024)    // /vehicle/ responses are larger
+// 64 KB covers international IC trains with very long stops arrays
+// (Eurocity / Thalys-replacement trains running through Brussels can
+// produce 30-40 KB of JSON each). Lives in PSRAM.
+#define IRAIL_VEHICLE_BUF    (64 * 1024)
 #define IRAIL_VEHICLE_TO_MS  10000
 #define CACHE_SIZE           16
 #define CACHE_TTL_SECONDS    300            // 5 min — via lists rarely change
@@ -95,7 +99,7 @@ static void cache_store(const char *id, const char *via)
 }
 
 // HTTP sink — same pattern as irail.c.
-typedef struct { char *buf; size_t cap, len; } http_sink_t;
+typedef struct { char *buf; size_t cap, len; bool truncated; } http_sink_t;
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -107,6 +111,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             memcpy(sink->buf + sink->len, evt->data, take);
             sink->len += take;
             sink->buf[sink->len] = '\0';
+        }
+        if ((size_t)evt->data_len > take) {
+            sink->truncated = true;
         }
     }
     return ESP_OK;
@@ -131,6 +138,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 // paging through them.
 static void format_via_from_stops(const cJSON *stops_arr,
                                   const char *origin,
+                                  bool include_terminus,
                                   char *out, size_t out_len)
 {
     out[0] = '\0';
@@ -158,9 +166,11 @@ static void format_via_from_stops(const cJSON *stops_arr,
     }
 
     // Start from one past our station (if found) or from the very first
-    // stop (if not). Stop one short of the terminus.
+    // stop (if not). For arrivals (include_terminus == true) we run all
+    // the way to the end so the final destination shows up as the last
+    // via stop; for departures we stop one short.
     int start = (origin_idx >= 0) ? origin_idx + 1 : 0;
-    int end   = n - 1;   // exclusive (= skip terminus)
+    int end   = include_terminus ? n : n - 1;   // exclusive
 
     bool started = false;
     size_t cursor = snprintf(out, out_len, "via ");
@@ -191,7 +201,7 @@ static void format_via_from_stops(const cJSON *stops_arr,
 }
 
 esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
-                                const char *origin,
+                                const char *origin, bool include_terminus,
                                 char *out_via, size_t out_len)
 {
     if (!vehicle_id || !vehicle_id[0] || !out_via || out_len < 8) {
@@ -199,14 +209,22 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
     }
     out_via[0] = '\0';
 
-    if (cache_lookup(vehicle_id, out_via, out_len)) {
+    // The terminus-included and terminus-excluded variants need separate
+    // cache slots — same train can appear in both flavours if the user has
+    // both boards loaded back-to-back. Suffix the cache id with "+T" when
+    // we're keeping the terminus.
+    char cache_id[40];
+    snprintf(cache_id, sizeof(cache_id), "%s%s", vehicle_id,
+             include_terminus ? "+T" : "");
+
+    if (cache_lookup(cache_id, out_via, out_len)) {
         return ESP_OK;
     }
 
-    char *buf = malloc(IRAIL_VEHICLE_BUF);
+    char *buf = heap_caps_malloc(IRAIL_VEHICLE_BUF, MALLOC_CAP_SPIRAM);
     if (!buf) return ESP_ERR_NO_MEM;
     buf[0] = '\0';
-    http_sink_t sink = { .buf = buf, .cap = IRAIL_VEHICLE_BUF, .len = 0 };
+    http_sink_t sink = { .buf = buf, .cap = IRAIL_VEHICLE_BUF, .len = 0, .truncated = false };
 
     struct tm tm;
     localtime_r(&when, &tm);
@@ -245,6 +263,12 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
         free(buf);
         return (err == ESP_OK) ? ESP_FAIL : err;
     }
+    if (sink.truncated) {
+        ESP_LOGW(TAG_IRAIL, "vehicle response exceeded %u-byte buffer (truncated at %u)",
+                 (unsigned)IRAIL_VEHICLE_BUF, (unsigned)sink.len);
+        free(buf);
+        return ESP_FAIL;
+    }
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
@@ -253,7 +277,7 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
     // iRail's /vehicle/ response has a top-level "stops": { "stop": [...] }.
     cJSON *stops_obj = cJSON_GetObjectItemCaseSensitive(root, "stops");
     cJSON *stops_arr = stops_obj ? cJSON_GetObjectItemCaseSensitive(stops_obj, "stop") : NULL;
-    format_via_from_stops(stops_arr, origin, out_via, out_len);
+    format_via_from_stops(stops_arr, origin, include_terminus, out_via, out_len);
 
     // Transliterate the assembled string in place — iRail UTF-8 -> ASCII.
     // (Local re-implementation to avoid pulling parser internals in.)
@@ -291,6 +315,6 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
     *w = '\0';
 
     cJSON_Delete(root);
-    cache_store(vehicle_id, out_via);
+    cache_store(cache_id, out_via);
     return ESP_OK;
 }

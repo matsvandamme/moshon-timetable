@@ -164,18 +164,25 @@ static void do_fetch(void)
     const char *origin = station_get_active()->display_name;
     if (s_deps_ok) {
         for (size_t i = 0; i < s_deps.count; i++) {
+            // Departures: yellow label already shows the terminus, so omit
+            // it from the via list to avoid duplication.
             irail_vehicle_get_via(s_deps.entries[i].vehicle_id,
                                   s_deps.entries[i].scheduled,
                                   origin,
+                                  /* include_terminus = */ false,
                                   s_deps.entries[i].via,
                                   sizeof(s_deps.entries[i].via));
         }
     }
     if (s_arrs_ok) {
         for (size_t i = 0; i < s_arrs.count; i++) {
+            // Arrivals: yellow label shows the train's ORIGIN, so the via
+            // list runs from "stop after us" all the way to (and including)
+            // the final destination — useful for onward-journey planning.
             irail_vehicle_get_via(s_arrs.entries[i].vehicle_id,
                                   s_arrs.entries[i].scheduled,
                                   origin,
+                                  /* include_terminus = */ true,
                                   s_arrs.entries[i].via,
                                   sizeof(s_arrs.entries[i].via));
         }

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
 #include "freertos/FreeRTOS.h"
@@ -13,7 +14,10 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define IRAIL_HTTP_BUF      (16 * 1024)
+// 96 KB is enough headroom for the busiest stations (Brussels-South /
+// Bruxelles-Midi typically returns 40-60 KB of JSON per direction). Lives
+// in PSRAM so it doesn't eat the precious internal RAM.
+#define IRAIL_HTTP_BUF      (96 * 1024)
 #define IRAIL_TIMEOUT_MS    10000
 #define IRAIL_HOST_PATH     "https://api.irail.be/v1/liveboard/"
 
@@ -23,6 +27,7 @@ typedef struct {
     char  *buf;
     size_t cap;
     size_t len;
+    bool   truncated;   // set if the body exceeded `cap` — parser will refuse it
 } http_sink_t;
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
@@ -37,6 +42,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                     memcpy(sink->buf + sink->len, evt->data, take);
                     sink->len += take;
                     sink->buf[sink->len] = '\0';
+                }
+                if ((size_t)evt->data_len > take) {
+                    sink->truncated = true;
                 }
             }
             break;
@@ -196,10 +204,12 @@ static esp_err_t parse_board(const char *json, bool is_departure, irail_board_t 
 
 static esp_err_t fetch(const char *arrdep, time_t for_time, irail_board_t *out)
 {
-    char *buf = malloc(IRAIL_HTTP_BUF);
+    // Allocate in PSRAM — 96 KB would eat too much of the ~512 KB internal
+    // RAM that's already shared with code, stacks and Wi-Fi/lwIP/mbedtls.
+    char *buf = heap_caps_malloc(IRAIL_HTTP_BUF, MALLOC_CAP_SPIRAM);
     if (!buf) return ESP_ERR_NO_MEM;
     buf[0] = '\0';
-    http_sink_t sink = { .buf = buf, .cap = IRAIL_HTTP_BUF, .len = 0 };
+    http_sink_t sink = { .buf = buf, .cap = IRAIL_HTTP_BUF, .len = 0, .truncated = false };
 
     // iRail accepts station= with the canonical name (any of nl/fr/en/de).
     // It also handles URL-encoding of accents like "Liège-Guillemins" for us
@@ -263,8 +273,17 @@ static esp_err_t fetch(const char *arrdep, time_t for_time, irail_board_t *out)
         free(buf);
         return ESP_FAIL;
     }
+    if (sink.truncated) {
+        // Truncated JSON would fail cJSON_Parse anyway; bail loudly so the
+        // user sees a real diagnostic in the serial log instead of a silent
+        // stuck-on-splash state. Bump IRAIL_HTTP_BUF if this fires.
+        ESP_LOGE(TAG_IRAIL, "Response exceeded %u-byte buffer (truncated at %u)",
+                 (unsigned)IRAIL_HTTP_BUF, (unsigned)sink.len);
+        free(buf);
+        return ESP_FAIL;
+    }
 
-    ESP_LOGD(TAG_IRAIL, "Body %u bytes", (unsigned)sink.len);
+    ESP_LOGI(TAG_IRAIL, "Body %u bytes", (unsigned)sink.len);
     esp_err_t prc = parse_board(buf, strcmp(arrdep, "departure") == 0, out);
     free(buf);
     if (prc == ESP_OK) {
