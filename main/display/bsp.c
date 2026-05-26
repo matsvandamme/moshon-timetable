@@ -19,6 +19,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_st7796.h"
+#include "esp_cache.h"
 
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_ft5x06.h"
@@ -78,11 +79,19 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     // shows up as olive-green. Doing it in software here is more reliable
     // than lv_display_set_color_format(LV_COLOR_FORMAT_RGB565_SWAPPED),
     // which doesn't appear to take effect with this LVGL 9.2 + ESP-IDF combo.
-    int pixels = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    size_t pixels = (size_t)(area->x2 - area->x1 + 1) * (size_t)(area->y2 - area->y1 + 1);
+    size_t bytes  = pixels * 2;
     uint16_t *p = (uint16_t *)px_map;
-    for (int i = 0; i < pixels; i++) {
+    for (size_t i = 0; i < pixels; i++) {
         p[i] = (uint16_t)((p[i] >> 8) | (p[i] << 8));
     }
+    // Flush CPU cache back to PSRAM. The byte-swap loop above writes via the
+    // data cache; the LCD's GDMA reads PSRAM directly and bypasses cache, so
+    // without this writeback it can read PRE-swap bytes (or whatever stale
+    // line was last in cache) and paint a brief band of wrong-coloured
+    // pixels — the exact "sporadic red/green flash" symptom we were chasing.
+    esp_cache_msync(px_map, bytes,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 

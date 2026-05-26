@@ -34,5 +34,6 @@ idf_component_register(
         driver
         esp_timer
         esp_psram
+        esp_mm
         lwip
 )
