@@ -152,8 +152,7 @@ static void format_via_from_stops(const cJSON *stops_arr,
     bool have_id = (our_id && our_id[0]);
 
     // Find our station's index in the route. Prefer ID match (canonical,
-    // language-independent); fall back to name match for the rare case
-    // where the liveboard response didn't carry stationinfo.id.
+    // language-independent); fall back to name match.
     int origin_idx = -1;
     for (int i = 0; i < n; i++) {
         const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
@@ -167,8 +166,7 @@ static void format_via_from_stops(const cJSON *stops_arr,
                 origin_idx = i;
                 break;
             }
-        }
-        if (origin && origin_idx < 0) {
+        } else if (origin) {
             const cJSON *station = cJSON_GetObjectItemCaseSensitive(stop, "station");
             if (cJSON_IsString(station) && station->valuestring &&
                 strcmp(station->valuestring, origin) == 0) {
