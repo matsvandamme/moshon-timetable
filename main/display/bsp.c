@@ -19,7 +19,6 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_st7796.h"
-#include "esp_cache.h"
 
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_ft5x06.h"
@@ -46,15 +45,17 @@ static TaskHandle_t      s_lvgl_task  = NULL;
 #define LVGL_TASK_PRIO     2
 #define LVGL_TICK_PERIOD_MS  2
 
-// PARTIAL render mode with 60-line draw buffers in PSRAM.
-// 60 lines * 480 px * 2 B = 57,600 bytes per buffer; 115 KB double-buffered.
+// PARTIAL render mode with 30-line draw buffers, now placed in INTERNAL
+// RAM (MALLOC_CAP_DMA) instead of PSRAM. PSRAM-backed DMA forced us to do
+// manual esp_cache_msync() in the flush callback, and a small portion of
+// flushes still occasionally landed with stale cache bytes mixed in — the
+// sporadic red/green colour-bleed the user kept reporting (clock area
+// flashing green, via lines / row backgrounds flashing red). Internal RAM
+// with the DMA cap eliminates the coherency surface entirely.
 //
-// This is the last visually-stable buffer size on this hardware. Bumping
-// past it (100, 160, full-frame) consistently produced garbled output,
-// likely because of i80 DMA-descriptor / cache-line interactions when the
-// transfer size grows past a hardware threshold. The companion `max_transfer_bytes`
-// in the i80 bus config tracks this value so the two stay in lockstep.
-#define LVGL_DRAW_BUF_LINES  60
+// 30 lines * 480 px * 2 B = 28,800 bytes per buffer; 57 KB double-buffered.
+// The companion `max_transfer_bytes` in the i80 bus config tracks this.
+#define LVGL_DRAW_BUF_LINES  30
 #define LVGL_DRAW_BUF_BYTES  (LCD_H_RES * LVGL_DRAW_BUF_LINES * 2)
 
 // ---------------------------------------------------------------------------
@@ -80,18 +81,12 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     // than lv_display_set_color_format(LV_COLOR_FORMAT_RGB565_SWAPPED),
     // which doesn't appear to take effect with this LVGL 9.2 + ESP-IDF combo.
     size_t pixels = (size_t)(area->x2 - area->x1 + 1) * (size_t)(area->y2 - area->y1 + 1);
-    size_t bytes  = pixels * 2;
     uint16_t *p = (uint16_t *)px_map;
     for (size_t i = 0; i < pixels; i++) {
         p[i] = (uint16_t)((p[i] >> 8) | (p[i] << 8));
     }
-    // Flush CPU cache back to PSRAM. The byte-swap loop above writes via the
-    // data cache; the LCD's GDMA reads PSRAM directly and bypasses cache, so
-    // without this writeback it can read PRE-swap bytes (or whatever stale
-    // line was last in cache) and paint a brief band of wrong-coloured
-    // pixels — the exact "sporadic red/green flash" symptom we were chasing.
-    esp_cache_msync(px_map, bytes,
-                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    // Internal-RAM DMA buffer — no explicit cache writeback needed; GDMA
+    // and CPU share the same memory view here.
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 
@@ -329,14 +324,14 @@ static esp_err_t lvgl_init(void)
     s_lvgl_mutex = xSemaphoreCreateRecursiveMutex();
     if (!s_lvgl_mutex) return ESP_ERR_NO_MEM;
 
-    // PSRAM-resident draw buffers. Zeroed at allocation so the very first
-    // flush — and any sub-area flush that LVGL doesn't fully cover — sees
-    // black bytes rather than uninitialised PSRAM that can render as a
-    // bright red or green block on screen for one frame.
-    void *buf1 = heap_caps_aligned_alloc(64, LVGL_DRAW_BUF_BYTES, MALLOC_CAP_SPIRAM);
-    void *buf2 = heap_caps_aligned_alloc(64, LVGL_DRAW_BUF_BYTES, MALLOC_CAP_SPIRAM);
+    // Internal-RAM DMA-capable draw buffers. PSRAM-backed DMA needed manual
+    // cache writebacks in the flush callback and still left intermittent
+    // colour bleed; internal RAM is cache-coherent with GDMA out of the
+    // box. 57 KB total — comfortable on the S3's ~300 KB available SRAM.
+    void *buf1 = heap_caps_malloc(LVGL_DRAW_BUF_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    void *buf2 = heap_caps_malloc(LVGL_DRAW_BUF_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!buf1 || !buf2) {
-        ESP_LOGE(TAG_BSP, "Failed to allocate LVGL draw buffers in PSRAM");
+        ESP_LOGE(TAG_BSP, "Failed to allocate LVGL draw buffers in internal RAM");
         return ESP_ERR_NO_MEM;
     }
     memset(buf1, 0, LVGL_DRAW_BUF_BYTES);
