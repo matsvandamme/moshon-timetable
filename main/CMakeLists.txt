@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "cfg.c"
         "demo.c"
+        "i18n.c"
         "stations.c"
         "display/bsp.c"
         "net/wifi.c"

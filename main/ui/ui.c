@@ -19,6 +19,7 @@
 #include "app_config.h"
 #include "stations.h"
 #include "cfg.h"
+#include "i18n.h"
 #include "esp_system.h"
 
 #include "esp_log.h"
@@ -90,6 +91,9 @@ static lv_obj_t *s_header_mm   = NULL;
 static lv_obj_t *s_header_mode = NULL;   // shows "Vertrek" OR "Aankomst" — single title
 static lv_obj_t *s_header_wifi = NULL;
 static lv_obj_t *s_logo        = NULL;   // NMBS B-in-oval; clickable to toggle mode
+// Small traffic-light dot indicating data freshness. Sits in the header
+// just left of the Wi-Fi indicator. Driven by ui_tick_freshness().
+static lv_obj_t *s_freshness_dot = NULL;
 // Wi-Fi status overlay (full-screen). Visible by default — the splash is
 // the FIRST thing the user sees at boot, before app_main even sets a message.
 static lv_obj_t *s_overlay       = NULL;
@@ -224,7 +228,8 @@ static void apply_header_title_locked(void)
 {
     if (!s_header_mode) return;
     lv_label_set_text(s_header_mode,
-                      (s_mode == UI_MODE_DEPARTURES) ? "Vertrek" : "Aankomst");
+                      i18n_text(s_mode == UI_MODE_DEPARTURES
+                                ? TR_DEPARTURES : TR_ARRIVALS));
 }
 
 static void apply_render_locked(void)
@@ -304,19 +309,16 @@ static int precompute_pages(const char *full, int num_stops,
 }
 
 // Force a full repaint of the active screen. Call after any major
-// transition (overlay shown/hidden, mode toggle, etc.) so the partial-
-// render path can't leave stale pixels from the previous frame behind.
-// Caller MUST already hold the LVGL lock.
+// transition (overlay shown/hidden, mode toggle) so the partial-render
+// path can't leave stale pixels from the previous frame behind. Caller
+// MUST already hold the LVGL lock.
 //
-// Two lv_refr_now calls: the first drains whatever dirty regions were
-// queued before this call, the second covers regions invalidated as a
-// side-effect of the first pass (e.g. styles transitioning under hidden
-// flags or freshly-shown widgets dirtying parent areas).
+// Just ONE lv_refr_now: invoking it twice back-to-back was overlapping
+// two DMA flushes through the same i80 buffer slot, occasionally
+// producing red/green colour bleed into widgets that hadn't changed.
 static void ui_full_redraw_locked(void)
 {
     if (!s_screen) return;
-    lv_obj_invalidate(s_screen);
-    lv_refr_now(NULL);
     lv_obj_invalidate(s_screen);
     lv_refr_now(NULL);
 }
@@ -342,7 +344,7 @@ static void on_long_press_reset(lv_event_t *e)
     cfg_erase_all();
     // Visual cue before the chip resets — the overlay paints almost
     // immediately even if esp_restart is queued right after.
-    ui_show_overlay("Reset...");
+    ui_show_overlay(i18n_text(TR_RESET));
     esp_restart();
 }
 
@@ -630,7 +632,7 @@ static void render_entry(int row_idx, lv_obj_t *row, const irail_entry_t *e)
 
     if (e->canceled) {
         lv_obj_clear_flag(slots[SLOT_DELAY_BOX], LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(slots[SLOT_DELAY_LBL], "AFG");
+        lv_label_set_text(slots[SLOT_DELAY_LBL], i18n_text(TR_CANCELLED_ABBR));
         lv_label_set_text(slots[SLOT_NEW_TIME], "");
         lv_obj_add_style(slots[SLOT_DEST], &st_text_dest_cancel, 0);
     } else if (e->delay_seconds >= 60) {
@@ -769,6 +771,19 @@ esp_err_t ui_build(void)
 
     // Wifi indicator (small, top-right inside header, sits left of the logo).
     s_header_wifi = label(hdr, &st_wifi_indicator, "", LCD_H_RES - 96, 12);
+
+    // Freshness traffic-light dot. 6 px round, centered vertically in the
+    // 40 px header, sits 8 px left of the wifi indicator. Starts RED until
+    // main.c reports a successful fetch via ui_tick_freshness().
+    s_freshness_dot = lv_obj_create(hdr);
+    lv_obj_remove_style_all(s_freshness_dot);
+    lv_obj_set_size(s_freshness_dot, 6, 6);
+    lv_obj_set_pos(s_freshness_dot, LCD_H_RES - 108, 17);
+    lv_obj_set_style_bg_color(s_freshness_dot, NMBS_RED, 0);
+    lv_obj_set_style_bg_opa(s_freshness_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_freshness_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_freshness_dot, 0, 0);
+    lv_obj_clear_flag(s_freshness_dot, LV_OBJ_FLAG_SCROLLABLE);
 
     // Actual NMBS/SNCB van de Velde B-in-oval, rasterised from the official
     // SVG at compile time (firmware/main/assets/nmbs_logo.c). 56x36 ARGB8888.
@@ -965,6 +980,42 @@ void ui_set_boards(const irail_board_t *deps, const irail_board_t *arrs)
     s_dep_board = deps;
     s_arr_board = arrs;
     apply_render_locked();
+    bsp_lvgl_unlock();
+}
+
+void ui_tick_freshness(time_t last_success_unix)
+{
+    // Only repaint the dot when its colour actually changes. Calling
+    // lv_obj_set_style_bg_color every second — even with the same value —
+    // marks the object dirty and forces a partial repaint, which on this
+    // i80-DMA pipeline very occasionally bleeds stale pixels (the dreaded
+    // red/green flashes in the via and clock areas).
+    static lv_color_t s_last_color = {0};
+    static bool       s_last_color_valid = false;
+
+    lv_color_t color = NMBS_RED;
+    if (last_success_unix != 0) {
+        time_t age = time(NULL) - last_success_unix;
+        if (age < 0) age = 0;   // clock skew defence
+        // Aggressive thresholds (per user choice):
+        //   green  <= 60 s
+        //   yellow 60 s < age <= 120 s
+        //   red    > 120 s
+        if (age <= 60)        color = lv_color_hex(0x33CC33);  // green
+        else if (age <= 120)  color = NMBS_YELLOW;
+        else                  color = NMBS_RED;
+    }
+
+    if (s_last_color_valid && lv_color_eq(color, s_last_color)) {
+        return;     // no visible change — don't dirty the dot
+    }
+
+    if (!bsp_lvgl_lock(50)) return;
+    if (s_freshness_dot) {
+        lv_obj_set_style_bg_color(s_freshness_dot, color, 0);
+        s_last_color = color;
+        s_last_color_valid = true;
+    }
     bsp_lvgl_unlock();
 }
 

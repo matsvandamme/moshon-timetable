@@ -9,6 +9,7 @@
 
 #include "provision_ap.h"
 #include "cfg.h"
+#include "i18n.h"
 #include "app_config.h"
 #include "stations_be.h"
 
@@ -75,6 +76,13 @@ static const char HTML_HEAD[] =
     "<h1>moshon-timetable</h1>"
     "<p class=\"sub\">Connect the display to your Wi-Fi and pick a station.</p>"
     "<form method=\"POST\" action=\"/save\">"
+    "<label>Display language"
+    "<select name=\"lang\" required>"
+    "<option value=\"nl\">Nederlands</option>"
+    "<option value=\"fr\">Francais</option>"
+    "<option value=\"en\">English</option>"
+    "<option value=\"de\">Deutsch</option>"
+    "</select></label>"
     "<label>Wi-Fi network (SSID)"
     "<input name=\"ssid\" type=\"text\" autocomplete=\"off\" autocapitalize=\"none\""
     " spellcheck=\"false\" required maxlength=\"32\"></label>"
@@ -166,14 +174,24 @@ static esp_err_t save_post(httpd_req_t *req)
     char ssid[CFG_FIELD_MAX]    = {0};
     char pass[CFG_FIELD_MAX]    = {0};
     char station[CFG_FIELD_MAX] = {0};
+    char lang[8]                = {0};
 
     httpd_query_key_value(body, "ssid",    ssid,    sizeof(ssid));
     httpd_query_key_value(body, "pass",    pass,    sizeof(pass));
     httpd_query_key_value(body, "station", station, sizeof(station));
+    httpd_query_key_value(body, "lang",    lang,    sizeof(lang));
     url_decode_inplace(ssid);
     url_decode_inplace(pass);
     url_decode_inplace(station);
+    url_decode_inplace(lang);
 
+    // Validate + persist the language pick. Falls back silently if the
+    // browser sent something unexpected, leaving the previous saved
+    // value (or the NL default) in place.
+    lang_t parsed;
+    if (lang[0] && i18n_parse_iso(lang, &parsed)) {
+        cfg_save_language(lang);
+    }
     if (ssid[0]) {
         cfg_save_wifi(ssid, pass);
     }

@@ -3,6 +3,7 @@
 #include "irail.h"
 #include "esp_err.h"
 #include <stdbool.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,15 @@ void ui_set_boards(const irail_board_t *deps, const irail_board_t *arrs);
 
 // Update the header clock + a small wifi/refresh indicator. Call ~1 Hz.
 void ui_tick_status(bool wifi_ok);
+
+// Update the small traffic-light dot in the header that shows how fresh
+// the on-screen data is. Pass the unix time of the most recent SUCCESSFUL
+// iRail fetch, or 0 if we've never had one. Thresholds:
+//   - green  : age <=  60 s
+//   - yellow : 60 s < age <= 120 s
+//   - red    : age > 120 s, or never fetched, or the last fetch failed
+// Pass last_success = 0 to force red regardless of clock. Call ~1 Hz.
+void ui_tick_freshness(time_t last_success_unix);
 
 // Show / hide a full-screen overlay that obscures the board view. Used for
 // "Verbinding maken..." on first boot and "Verbinding hervatten..." after a

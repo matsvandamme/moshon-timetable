@@ -13,6 +13,8 @@
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
 
+#include <string.h>
+
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
@@ -318,13 +320,18 @@ static esp_err_t lvgl_init(void)
     s_lvgl_mutex = xSemaphoreCreateRecursiveMutex();
     if (!s_lvgl_mutex) return ESP_ERR_NO_MEM;
 
-    // PSRAM-resident draw buffers.
+    // PSRAM-resident draw buffers. Zeroed at allocation so the very first
+    // flush — and any sub-area flush that LVGL doesn't fully cover — sees
+    // black bytes rather than uninitialised PSRAM that can render as a
+    // bright red or green block on screen for one frame.
     void *buf1 = heap_caps_aligned_alloc(64, LVGL_DRAW_BUF_BYTES, MALLOC_CAP_SPIRAM);
     void *buf2 = heap_caps_aligned_alloc(64, LVGL_DRAW_BUF_BYTES, MALLOC_CAP_SPIRAM);
     if (!buf1 || !buf2) {
         ESP_LOGE(TAG_BSP, "Failed to allocate LVGL draw buffers in PSRAM");
         return ESP_ERR_NO_MEM;
     }
+    memset(buf1, 0, LVGL_DRAW_BUF_BYTES);
+    memset(buf2, 0, LVGL_DRAW_BUF_BYTES);
 
     s_display = lv_display_create(LCD_H_RES, LCD_V_RES);
     lv_display_set_flush_cb(s_display, lvgl_flush_cb);

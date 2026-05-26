@@ -40,6 +40,13 @@ esp_err_t cfg_load_station(char *name, size_t len);
 esp_err_t cfg_save_station(const char *name);
 esp_err_t cfg_erase_station(void);
 
+// ---------- UI language ----------
+
+// ISO-639-1 two-letter code: "nl", "fr", "en" or "de". Loaded at boot
+// by i18n_init(); written by the captive-portal /save handler.
+esp_err_t cfg_load_language(char *iso, size_t len);
+esp_err_t cfg_save_language(const char *iso);
+
 // ---------- Wipe everything ----------
 
 // Convenience: erase Wi-Fi creds AND station. Used by the on-screen
