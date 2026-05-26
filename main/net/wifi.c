@@ -1,6 +1,12 @@
 #include "wifi.h"
+#include "cfg.h"
 #include "app_config.h"
+// wifi_secrets.h is still consulted as a one-time migration path on first
+// boot after this refactor, so a user who already had creds compiled in
+// doesn't have to re-enter them via the AP form.
+#if __has_include("wifi_secrets.h")
 #include "wifi_secrets.h"
+#endif
 
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -80,9 +86,33 @@ esp_err_t wifi_start_and_wait(uint32_t timeout_ms)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL, NULL));
 
+    // Resolve credentials: NVS first; if empty, migrate from any compile-time
+    // WIFI_SSID/WIFI_PASSWORD that isn't the placeholder; else fail (caller
+    // is expected to enter AP-mode provisioning).
+    char ssid_buf[CFG_FIELD_MAX] = {0};
+    char pass_buf[CFG_FIELD_MAX] = {0};
+    esp_err_t cerr = cfg_load_wifi(ssid_buf, sizeof(ssid_buf),
+                                   pass_buf, sizeof(pass_buf));
+    if (cerr != ESP_OK || ssid_buf[0] == '\0') {
+#if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
+        const char *cs = WIFI_SSID;
+        const char *cp = WIFI_PASSWORD;
+        if (cs[0] && strstr(cs, "REPLACE_WITH") == NULL) {
+            ESP_LOGW(TAG_WIFI, "Migrating compile-time creds to NVS");
+            strncpy(ssid_buf, cs, sizeof(ssid_buf) - 1);
+            strncpy(pass_buf, cp, sizeof(pass_buf) - 1);
+            cfg_save_wifi(ssid_buf, pass_buf);
+        }
+#endif
+        if (ssid_buf[0] == '\0') {
+            ESP_LOGE(TAG_WIFI, "No Wi-Fi credentials available");
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+
     wifi_config_t cfg = { 0 };
-    strncpy((char *)cfg.sta.ssid,     WIFI_SSID,     sizeof(cfg.sta.ssid) - 1);
-    strncpy((char *)cfg.sta.password, WIFI_PASSWORD, sizeof(cfg.sta.password) - 1);
+    strncpy((char *)cfg.sta.ssid,     ssid_buf, sizeof(cfg.sta.ssid) - 1);
+    strncpy((char *)cfg.sta.password, pass_buf, sizeof(cfg.sta.password) - 1);
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -108,6 +138,11 @@ bool wifi_is_connected(void)
 esp_err_t time_sync_start(void)
 {
     ESP_LOGI(TAG_WIFI, "Starting SNTP");
+    // NTP_SERVER_1 may come from wifi_secrets.h on legacy local builds; if
+    // the file is gone fall back to a sensible default.
+#ifndef NTP_SERVER_1
+#define NTP_SERVER_1 "be.pool.ntp.org"
+#endif
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER_1);
     cfg.server_from_dhcp = true;
     cfg.renew_servers_after_new_IP = true;

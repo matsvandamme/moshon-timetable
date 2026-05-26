@@ -9,6 +9,8 @@
 #include "irail_vehicle.h"
 #include "stations.h"
 #include "demo.h"
+#include "cfg.h"
+#include "provision_ap.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -229,6 +231,23 @@ void app_main(void)
     ESP_ERROR_CHECK(ui_build());
     ui_set_mode(UI_MODE_DEPARTURES);   // initial tab
     ui_tick_status(false);
+    cfg_init();
+
+#ifndef CONFIG_DEMO_MODE
+    // No Wi-Fi creds in NVS AND no compile-time fallback? Bring up the
+    // SoftAP, show setup instructions, and wait — the form's /save handler
+    // saves creds + restarts the chip into normal STA mode.
+    if (!cfg_has_wifi()) {
+        ui_show_provisioning(PROVISION_AP_SSID, PROVISION_AP_URL);
+        if (provision_ap_start() == ESP_OK) {
+            // provision_ap_start returns immediately; let the captive
+            // portal handle the rest. Idle here forever (the /save
+            // handler will esp_restart() once the user submits).
+            while (1) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+        ESP_LOGE(TAG_APP, "AP provisioning failed to start");
+    }
+#endif
 
     // Show the connect-to-Wi-Fi splash while we attempt association.
     int64_t splash_started_us = esp_timer_get_time();

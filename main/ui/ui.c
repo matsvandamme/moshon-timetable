@@ -18,6 +18,8 @@
 #include "bsp.h"
 #include "app_config.h"
 #include "stations.h"
+#include "cfg.h"
+#include "esp_system.h"
 
 #include "esp_log.h"
 #include <stdio.h>
@@ -88,9 +90,11 @@ static lv_obj_t *s_header_mode = NULL;   // shows "Vertrek" OR "Aankomst" — si
 static lv_obj_t *s_header_wifi = NULL;
 static lv_obj_t *s_logo        = NULL;   // NMBS B-in-oval; clickable to toggle mode
 // Wi-Fi status overlay (full-screen). Hidden by default.
-static lv_obj_t *s_overlay      = NULL;
-static lv_obj_t *s_overlay_msg  = NULL;
-static lv_obj_t *s_overlay_info = NULL;   // bottom build-info panel
+static lv_obj_t *s_overlay       = NULL;
+static lv_obj_t *s_overlay_msg   = NULL;
+static lv_obj_t *s_overlay_sub1  = NULL;   // secondary line (e.g. AP SSID)
+static lv_obj_t *s_overlay_sub2  = NULL;   // secondary line (e.g. URL)
+static lv_obj_t *s_overlay_info  = NULL;   // bottom build-info panel
 static bool      s_overlay_visible = false;
 static lv_obj_t *s_rows[N_ROWS] = {0};
 static via_state_t s_via_state[N_ROWS] = {0};
@@ -279,6 +283,20 @@ static void on_logo_tap(lv_event_t *e)
     s_mode = (s_mode == UI_MODE_DEPARTURES) ? UI_MODE_ARRIVALS : UI_MODE_DEPARTURES;
     apply_header_title_locked();
     apply_render_locked();
+}
+
+// 3-second hold anywhere on the screen wipes Wi-Fi credentials from NVS
+// and reboots into AP-mode provisioning. The hold time is set in bsp.c
+// via lv_indev_set_long_press_time.
+static void on_long_press_reset(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGW(TAG_UI, "Long-press detected: erasing Wi-Fi creds + restarting");
+    cfg_erase_wifi();
+    // Visual cue before the chip resets — the overlay paints almost
+    // immediately even if esp_restart is queued right after.
+    ui_show_overlay("Reset...");
+    esp_restart();
 }
 
 // -------- Styles --------
@@ -671,12 +689,17 @@ esp_err_t ui_build(void)
     // Body is a big tap target, and we also flag each row clickable since
     // LVGL 9's click bubbling through opaque non-clickable children is
     // unreliable. Both paths invoke the same toggle handler.
+    // Long-press on body OR header wipes Wi-Fi creds and reboots into the
+    // AP provisioning flow (3 s hold; configured in bsp.c).
     lv_obj_add_flag(body, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(body, on_logo_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(body, on_long_press_reset, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(hdr,  on_long_press_reset, LV_EVENT_LONG_PRESSED, NULL);
     for (int i = 0; i < N_ROWS; i++) {
         s_rows[i] = build_row(body, i);
         lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_rows[i], on_logo_tap, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(s_rows[i], on_long_press_reset, LV_EVENT_LONG_PRESSED, NULL);
     }
 
     apply_header_title_locked();
@@ -690,13 +713,28 @@ esp_err_t ui_build(void)
     // Big NMBS logo, centred a bit above the middle.
     lv_obj_t *ovl_logo = lv_image_create(s_overlay);
     lv_image_set_src(ovl_logo, &nmbs_logo);
-    lv_obj_align(ovl_logo, LV_ALIGN_CENTER, 0, -60);
-    // Message label below the logo, centred.
+    lv_obj_align(ovl_logo, LV_ALIGN_CENTER, 0, -70);
+    // Headline message below the logo, centred.
     s_overlay_msg = lv_label_create(s_overlay);
     lv_obj_remove_style_all(s_overlay_msg);
     lv_obj_add_style(s_overlay_msg, &st_text_mode, 0);
     lv_label_set_text(s_overlay_msg, "");
-    lv_obj_align(s_overlay_msg, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_overlay_msg, LV_ALIGN_CENTER, 0, -10);
+    // Two-line secondary panel used by the AP-mode provisioning screen.
+    s_overlay_sub1 = lv_label_create(s_overlay);
+    lv_obj_remove_style_all(s_overlay_sub1);
+    lv_obj_set_style_text_color(s_overlay_sub1, NMBS_OFFWHITE, 0);
+    lv_obj_set_style_text_font(s_overlay_sub1, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_align(s_overlay_sub1, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_overlay_sub1, "");
+    lv_obj_align(s_overlay_sub1, LV_ALIGN_CENTER, 0, 26);
+    s_overlay_sub2 = lv_label_create(s_overlay);
+    lv_obj_remove_style_all(s_overlay_sub2);
+    lv_obj_set_style_text_color(s_overlay_sub2, NMBS_YELLOW, 0);
+    lv_obj_set_style_text_font(s_overlay_sub2, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_align(s_overlay_sub2, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_overlay_sub2, "");
+    lv_obj_align(s_overlay_sub2, LV_ALIGN_CENTER, 0, 56);
 
     // Small build-info panel at the bottom: app + version, build date,
     // ESP-IDF version, developer, source URL. Anchored to the bottom so
@@ -738,12 +776,41 @@ void ui_show_overlay(const char *message)
         if (message && s_overlay_msg) {
             lv_label_set_text(s_overlay_msg, message);
         }
+        // Clear the two-line setup panel so the simple overlay variant
+        // doesn't show leftover provisioning text.
+        if (s_overlay_sub1) lv_label_set_text(s_overlay_sub1, "");
+        if (s_overlay_sub2) lv_label_set_text(s_overlay_sub2, "");
         lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_overlay);
         s_overlay_visible = true;
-        // Force a full-screen repaint so the navy overlay actually covers
-        // any stale row content from a recent partial flush.
+        // Force a full-screen invalidate AND synchronously flush so the
+        // overlay actually replaces every pixel before this call returns
+        // — otherwise partial-render artefacts from prior frames can leak.
         if (s_screen) lv_obj_invalidate(s_screen);
+        lv_refr_now(NULL);
+    }
+    bsp_lvgl_unlock();
+}
+
+void ui_show_provisioning(const char *ap_ssid, const char *url)
+{
+    if (!bsp_lvgl_lock(500)) return;
+    if (s_overlay && s_overlay_msg) {
+        lv_label_set_text(s_overlay_msg, "Setup mode");
+        if (s_overlay_sub1) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Connect to Wi-Fi: %s",
+                     ap_ssid ? ap_ssid : "?");
+            lv_label_set_text(s_overlay_sub1, buf);
+        }
+        if (s_overlay_sub2) {
+            lv_label_set_text(s_overlay_sub2, url ? url : "");
+        }
+        lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_overlay);
+        s_overlay_visible = true;
+        if (s_screen) lv_obj_invalidate(s_screen);
+        lv_refr_now(NULL);
     }
     bsp_lvgl_unlock();
 }
@@ -754,7 +821,10 @@ void ui_hide_overlay(void)
     if (s_overlay) {
         lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
         s_overlay_visible = false;
+        // Same trick on the way out — invalidate + sync flush so the
+        // timetable underneath is fully redrawn before this returns.
         if (s_screen) lv_obj_invalidate(s_screen);
+        lv_refr_now(NULL);
     }
     bsp_lvgl_unlock();
 }

@@ -35,12 +35,18 @@ jobs:
       - name: Install esptool
         run: pip install esptool
 
-      - name: Merge firmware images
+      # esp-idf-ci-action runs inside docker and leaves build/ owned by
+      # root, so the runner user can't write into it. Take ownership back
+      # before merging firmware images.
+      - name: Take ownership of build dir
+        run: sudo chown -R $USER:$USER build
+
+      - name: Merge firmware images (single-file flash)
         working-directory: build
         run: |
-          esptool.py --chip esp32s3 merge_bin \
+          esptool.py --chip esp32s3 merge-bin \
             -o moshon_timetable-full.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            --flash-mode dio --flash-freq 80m --flash-size 16MB \
             0x0    bootloader/bootloader.bin \
             0x8000 partition_table/partition-table.bin \
             0x10000 moshon_timetable.bin

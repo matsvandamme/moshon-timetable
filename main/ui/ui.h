@@ -36,6 +36,12 @@ void ui_tick_status(bool wifi_ok);
 void ui_show_overlay(const char *message);
 void ui_hide_overlay(void);
 
+// Variant of the overlay used while the device is in AP-mode provisioning:
+// big NMBS logo, "Setup mode" headline, two instruction lines telling the
+// user which Wi-Fi to join and which URL to open, plus the build info at
+// the bottom. Stays on screen until the chip is rebooted by /save.
+void ui_show_provisioning(const char *ap_ssid, const char *url);
+
 #ifdef __cplusplus
 }
 #endif

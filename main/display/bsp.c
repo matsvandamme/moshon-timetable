@@ -347,6 +347,8 @@ static esp_err_t lvgl_init(void)
     lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(s_touch_indev, lvgl_touch_read_cb);
     lv_indev_set_display(s_touch_indev, s_display);
+    // 3 seconds for the wipe-Wi-Fi long-press gesture (handled in ui.c).
+    lv_indev_set_long_press_time(s_touch_indev, 3000);
 
     BaseType_t ok = xTaskCreatePinnedToCore(
         lvgl_task, "lvgl", LVGL_TASK_STACK, NULL, LVGL_TASK_PRIO, &s_lvgl_task, 1);
