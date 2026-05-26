@@ -16,6 +16,7 @@ extern "C" {
                                    // generous so late stops aren't dropped at
                                    // the source (the on-screen paginator in
                                    // ui.c handles wide via lines visually)
+#define IRAIL_ALERT_LEN     192    // one-line alert headline from liveboard
 
 typedef struct {
     time_t   scheduled;                      // absolute time (unix)
@@ -37,6 +38,8 @@ typedef struct {
     time_t        for_time;   // 0 = "now"; else the absolute unix time we
                               // asked iRail for (used by the overnight
                               // fallback that requests tomorrow ~05:00).
+    char          alert_headline[IRAIL_ALERT_LEN];  // empty when no active
+                                                    // service alert
 } irail_board_t;
 
 // Fetch the liveboard for the active station at a specific moment in time.

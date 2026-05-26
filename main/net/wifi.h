@@ -7,7 +7,8 @@
 extern "C" {
 #endif
 
-// Bring up Wi-Fi station mode with credentials from wifi_secrets.h.
+// Bring up Wi-Fi station mode using credentials previously stored in NVS
+// by the captive-portal /save handler (or the soft settings page).
 // Blocks until either:
 //   - associated + got IP (returns ESP_OK), or
 //   - timeout_ms elapsed (returns ESP_ERR_TIMEOUT).

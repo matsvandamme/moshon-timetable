@@ -1,5 +1,12 @@
-# Name,    Type, SubType,  Offset,   Size,    Flags
-nvs,       data, nvs,      0x9000,   0x6000,
-phy_init,  data, phy,      0xf000,   0x1000,
-factory,   app,  factory,  0x10000,  3M,
-storage,   data, spiffs,   ,         1M,
+# Name,     Type, SubType,  Offset,    Size,    Flags
+# OTA layout: two app slots + an otadata partition so esp_https_ota can
+# atomically download a new build into the inactive slot and switch on
+# next boot. Users upgrading from the old factory-only layout must do
+# ONE more USB re-flash to switch — after that all updates can be done
+# over the network from the device's web settings page.
+nvs,        data, nvs,      0x9000,    0x6000,
+otadata,    data, ota,      0xf000,    0x2000,
+phy_init,   data, phy,      0x11000,   0x1000,
+ota_0,      app,  ota_0,    0x20000,   0x200000,
+ota_1,      app,  ota_1,    0x220000,  0x200000,
+storage,    data, spiffs,   0x420000,  0x100000,

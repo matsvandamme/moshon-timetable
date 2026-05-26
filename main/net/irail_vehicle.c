@@ -21,6 +21,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "nvs.h"
 #include "cJSON.h"
 
 #include "freertos/FreeRTOS.h"
@@ -46,10 +47,48 @@ typedef struct {
 
 static cache_entry_t   s_cache[CACHE_SIZE];
 static SemaphoreHandle_t s_cache_mu = NULL;
+static bool            s_persist_loaded = false;
+
+#define NVS_NS    "moshon"
+#define NVS_KEY   "via_cache"
+
+// Load the cache blob from NVS on first use. Entries whose TTL has
+// already elapsed are discarded. Persistence means the via subtitles
+// pop in instantly after a reboot instead of waiting for ~24 vehicle
+// fetches to repopulate.
+static void cache_load_from_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof(s_cache);
+    if (nvs_get_blob(h, NVS_KEY, s_cache, &len) == ESP_OK) {
+        time_t now = time(NULL);
+        int kept = 0;
+        for (int i = 0; i < CACHE_SIZE; i++) {
+            if (s_cache[i].id[0] && s_cache[i].expires > now) kept++;
+            else memset(&s_cache[i], 0, sizeof(s_cache[i]));
+        }
+        ESP_LOGI(TAG_IRAIL, "via cache: loaded %d entries from NVS", kept);
+    }
+    nvs_close(h);
+}
+
+static void cache_save_to_nvs(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, NVS_KEY, s_cache, sizeof(s_cache));
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 static void cache_init_once(void)
 {
     if (!s_cache_mu) s_cache_mu = xSemaphoreCreateMutex();
+    if (!s_persist_loaded) {
+        s_persist_loaded = true;
+        cache_load_from_nvs();
+    }
 }
 
 // Returns true if cache has a fresh entry; copies the cached via into `out`.
@@ -96,6 +135,10 @@ static void cache_store(const char *id, const char *via)
     s_cache[victim].via[sizeof(s_cache[victim].via) - 1] = '\0';
     s_cache[victim].expires = now + CACHE_TTL_SECONDS;
     xSemaphoreGive(s_cache_mu);
+    // Persist outside the mutex — NVS writes can take tens of ms and we
+    // don't want lookups to stall behind that. Worst case a concurrent
+    // store races and overwrites this one's snapshot: harmless.
+    cache_save_to_nvs();
 }
 
 // HTTP sink — same pattern as irail.c.

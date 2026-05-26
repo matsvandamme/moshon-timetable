@@ -13,11 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # wifi_secrets.h is gitignored. CI doesn't need real creds — it just
-      # needs the file to exist with compile-time defines so wifi.c builds.
-      - name: Provision placeholder wifi_secrets.h
-        run: cp main/wifi_secrets.h.example main/wifi_secrets.h
-
       - name: ESP-IDF build
         uses: espressif/esp-idf-ci-action@v1
         with:

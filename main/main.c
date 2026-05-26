@@ -12,9 +12,12 @@
 #include "cfg.h"
 #include "i18n.h"
 #include "provision_ap.h"
+#include "settings_web.h"
+#include "weather.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_ota_ops.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -37,23 +40,6 @@ static bool          s_arrs_ok = false;
 #define ROWS_TARGET     5         // matches N_ROWS in ui.c
 #define PAGE_GAP_SEC    60        // ask for "last_entry + 1 minute" next page
 #define PAGE_MAX_TRIES  4         // upper bound on extra HTTP calls per side
-
-// Append entries from `extra` to `out`, deduping on (scheduled, vehicle).
-static void merge_board(irail_board_t *out, const irail_board_t *extra)
-{
-    for (size_t i = 0; i < extra->count && out->count < IRAIL_MAX_ENTRIES; i++) {
-        const irail_entry_t *e = &extra->entries[i];
-        bool dup = false;
-        for (size_t j = 0; j < out->count; j++) {
-            if (out->entries[j].scheduled == e->scheduled &&
-                strcmp(out->entries[j].vehicle, e->vehicle) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) out->entries[out->count++] = *e;
-    }
-}
 
 // Fetch `arrdep` and return the next ROWS_TARGET trains whose
 // scheduled-time + delay is STILL IN THE FUTURE relative to wall-clock now.
@@ -198,6 +184,20 @@ static bool boards_have_data(void)
            (s_arrs_ok && s_arrs.count > 0);
 }
 
+// Returns true if the current local hour falls inside the user's
+// configured night-dim window. Window can wrap midnight: 22..7 means
+// "dim from 10 PM through 7 AM".
+static bool in_dim_window(uint8_t start, uint8_t end)
+{
+    if (start == end) return false;       // disabled
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    int h = tm.tm_hour;
+    if (start < end) return h >= start && h < end;
+    return h >= start || h < end;        // wraps midnight
+}
+
 // One-second state machine. Computes the desired overlay state from
 // (wifi_ok, last_fetch_succeeded, boards_have_data) and only transitions
 // the UI when the desired state differs from the current state — so the
@@ -213,12 +213,10 @@ static void main_loop_task(void *arg)
     // delivers at least one entry, which paints the dot red on screen.
     time_t last_success = 0;
     bool   was_wifi   = wifi_is_connected();
-    // overlay_up tracks the current on-screen state. Initialised to true
-    // because ui_build leaves the boot splash visible.
-    bool   overlay_up = true;
-    // Tracks the message currently displayed under the overlay, so we
-    // only re-call ui_show_overlay when the text needs to change.
+    bool   overlay_up = true;       // ui_build leaves the boot splash visible
     const char *overlay_msg = i18n_text(TR_CONNECTING);
+    bool   was_dimmed = false;      // tracks current backlight on/off state
+    time_t last_weather_fetch = 0;
 
     while (1) {
         time_t now = time(NULL);
@@ -278,6 +276,38 @@ static void main_loop_task(void *arg)
 
         ui_tick_status(wifi_ok);
         ui_tick_freshness(last_success);
+
+        // Alert banner: surface the freshest non-empty alert from either
+        // board, clear it when neither has one.
+        const char *alert = "";
+        if (s_deps_ok && s_deps.alert_headline[0]) alert = s_deps.alert_headline;
+        else if (s_arrs_ok && s_arrs.alert_headline[0]) alert = s_arrs.alert_headline;
+        ui_set_alert(alert);
+
+        // Auto-dim: read the user's NVS-saved window each tick (cheap NVS
+        // read; user changes take effect within a second). When inside the
+        // window, force backlight to 0; otherwise restore daytime brightness.
+        uint8_t dim_s = 0, dim_e = 0;
+        cfg_load_dim_hours(&dim_s, &dim_e);
+        bool should_dim = in_dim_window(dim_s, dim_e);
+        if (should_dim != was_dimmed) {
+            bsp_set_backlight(should_dim ? 0 : 80);
+            was_dimmed = should_dim;
+        }
+
+        // Weather: refresh once every 10 min via Open-Meteo. Cheap enough
+        // not to throttle iRail. Skipped entirely if no coords configured.
+        if (wifi_ok && weather_enabled() &&
+            (last_weather_fetch == 0 || (now - last_weather_fetch) >= 600)) {
+            float t; int code;
+            if (weather_fetch(&t, &code) == ESP_OK) {
+                ui_set_weather(t, code);
+            }
+            last_weather_fetch = now;
+        } else if (!weather_enabled()) {
+            ui_set_weather(0, -1);   // hides the chip if user unsets coords
+        }
+
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -330,6 +360,21 @@ void app_main(void)
     if (wres == ESP_OK) {
         time_sync_start();
         vTaskDelay(pdMS_TO_TICKS(1500));   // let SNTP land before first fetch labels things
+        // Bring up the on-network settings page + OTA endpoint + mDNS so
+        // the user can configure the device from a browser on their LAN
+        // without ever needing the AP-mode portal again.
+        settings_web_start();
+        // Mark this OTA boot as valid so the bootloader doesn't roll back
+        // to the previous slot on the next reset. No-op for the factory
+        // image; only meaningful after the user has done an OTA update.
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (running && esp_ota_get_state_partition(running, &state) == ESP_OK) {
+            if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+                ESP_LOGI(TAG_APP, "OTA: marking new image valid");
+                esp_ota_mark_app_valid_cancel_rollback();
+            }
+        }
     } else {
         ESP_LOGW(TAG_APP, "Wi-Fi not up after 20 s — splash stays visible, retries continue");
     }

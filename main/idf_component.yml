@@ -15,3 +15,8 @@ dependencies:
   # FT5x06-family touch driver — handles FT6336U on the WT32-SC01 Plus.
   espressif/esp_lcd_touch_ft5x06:
     version: "^1.0.6"
+
+  # mDNS — exposes the device as moshon-timetable.local so users can find
+  # the on-network settings page + OTA endpoint without knowing the IP.
+  espressif/mdns:
+    version: "^1.3"

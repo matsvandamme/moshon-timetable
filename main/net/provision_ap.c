@@ -50,7 +50,11 @@ static httpd_handle_t s_httpd = NULL;
 // full Belgian-stations datalist (~21 KB, see stations_be.c) in the
 // middle without one giant static string.
 // -------------------------------------------------------------------
-static const char HTML_HEAD[] =
+// Head / form is split into chunks so the GET handler can interleave
+// current NVS values into the `value=` and `selected` attributes,
+// letting the user see what they already configured and only change
+// what they need to.
+static const char HTML_STYLE[] =
     "<!DOCTYPE html><html lang=\"en\"><head>"
     "<meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -75,27 +79,31 @@ static const char HTML_HEAD[] =
     "</style></head><body>"
     "<h1>moshon-timetable</h1>"
     "<p class=\"sub\">Connect the display to your Wi-Fi and pick a station.</p>"
-    "<form method=\"POST\" action=\"/save\">"
-    "<label>Display language"
-    "<select name=\"lang\" required>"
-    "<option value=\"nl\">Nederlands</option>"
-    "<option value=\"fr\">Francais</option>"
-    "<option value=\"en\">English</option>"
-    "<option value=\"de\">Deutsch</option>"
-    "</select></label>"
-    "<label>Wi-Fi network (SSID)"
-    "<input name=\"ssid\" type=\"text\" autocomplete=\"off\" autocapitalize=\"none\""
-    " spellcheck=\"false\" required maxlength=\"32\"></label>"
-    "<label>Wi-Fi password"
-    "<input name=\"pass\" type=\"password\" autocomplete=\"new-password\""
-    " maxlength=\"63\"></label>"
-    "<label>Station (type to search)"
-    "<input name=\"station\" list=\"be_stations\" type=\"text\""
-    " autocomplete=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
-    " required maxlength=\"48\"></label>"
-    "<button type=\"submit\">Save and restart</button>"
-    "</form>"
-    "<datalist id=\"be_stations\">";
+    "<form method=\"POST\" action=\"/save\">";
+
+// Inline minimal HTML-attribute escaper (covers SSID / station names
+// that contain &, <, >, " — keeps the form structurally intact).
+static void html_escape_chunk(httpd_req_t *req, const char *s)
+{
+    const char *p = s, *q = s;
+    while (*q) {
+        const char *repl = NULL;
+        switch (*q) {
+            case '<': repl = "&lt;";   break;
+            case '>': repl = "&gt;";   break;
+            case '&': repl = "&amp;";  break;
+            case '"': repl = "&quot;"; break;
+            default:  break;
+        }
+        if (repl) {
+            if (q > p) httpd_resp_send_chunk(req, p, q - p);
+            httpd_resp_send_chunk(req, repl, HTTPD_RESP_USE_STRLEN);
+            p = q + 1;
+        }
+        q++;
+    }
+    if (q > p) httpd_resp_send_chunk(req, p, q - p);
+}
 
 static const char HTML_TAIL[] =
     "</datalist>"
@@ -139,9 +147,59 @@ static esp_err_t serve_setup_form(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    httpd_resp_send_chunk(req, HTML_HEAD, HTTPD_RESP_USE_STRLEN);
-    // All ~714 Belgian stations as pre-rendered <option> tags. Streamed
-    // in one big chunk; total payload is ~20 KB.
+    char ssid[CFG_FIELD_MAX]    = {0};
+    char pass[CFG_FIELD_MAX]    = {0};
+    char station[CFG_FIELD_MAX] = {0};
+    char lang[8]                = {0};
+    cfg_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass));
+    cfg_load_station(station, sizeof(station));
+    cfg_load_language(lang, sizeof(lang));
+
+    httpd_resp_send_chunk(req, HTML_STYLE, HTTPD_RESP_USE_STRLEN);
+
+    // Language dropdown with the saved option pre-selected
+    httpd_resp_send_chunk(req,
+        "<label>Display language<select name=\"lang\" required>"
+        "<option value=\"nl\"", HTTPD_RESP_USE_STRLEN);
+    if (strcmp(lang, "nl") == 0) httpd_resp_send_chunk(req, " selected", 9);
+    httpd_resp_send_chunk(req, ">Nederlands</option><option value=\"fr\"", HTTPD_RESP_USE_STRLEN);
+    if (strcmp(lang, "fr") == 0) httpd_resp_send_chunk(req, " selected", 9);
+    httpd_resp_send_chunk(req, ">Francais</option><option value=\"en\"", HTTPD_RESP_USE_STRLEN);
+    if (strcmp(lang, "en") == 0) httpd_resp_send_chunk(req, " selected", 9);
+    httpd_resp_send_chunk(req, ">English</option><option value=\"de\"", HTTPD_RESP_USE_STRLEN);
+    if (strcmp(lang, "de") == 0) httpd_resp_send_chunk(req, " selected", 9);
+    httpd_resp_send_chunk(req, ">Deutsch</option></select></label>", HTTPD_RESP_USE_STRLEN);
+
+    // SSID
+    httpd_resp_send_chunk(req,
+        "<label>Wi-Fi network (SSID)<input name=\"ssid\" type=\"text\""
+        " autocomplete=\"off\" autocapitalize=\"none\" spellcheck=\"false\""
+        " required maxlength=\"32\" value=\"", HTTPD_RESP_USE_STRLEN);
+    html_escape_chunk(req, ssid);
+    httpd_resp_send_chunk(req, "\"></label>", HTTPD_RESP_USE_STRLEN);
+
+    // Password
+    httpd_resp_send_chunk(req,
+        "<label>Wi-Fi password<input name=\"pass\" type=\"password\""
+        " autocomplete=\"new-password\" maxlength=\"63\" value=\"",
+        HTTPD_RESP_USE_STRLEN);
+    html_escape_chunk(req, pass);
+    httpd_resp_send_chunk(req, "\"></label>", HTTPD_RESP_USE_STRLEN);
+
+    // Station (datalist input)
+    httpd_resp_send_chunk(req,
+        "<label>Station (type to search)<input name=\"station\""
+        " list=\"be_stations\" type=\"text\" autocomplete=\"off\""
+        " autocapitalize=\"words\" spellcheck=\"false\" required"
+        " maxlength=\"48\" value=\"", HTTPD_RESP_USE_STRLEN);
+    html_escape_chunk(req, station);
+    httpd_resp_send_chunk(req, "\"></label>", HTTPD_RESP_USE_STRLEN);
+
+    httpd_resp_send_chunk(req,
+        "<button type=\"submit\">Save and restart</button></form>"
+        "<datalist id=\"be_stations\">", HTTPD_RESP_USE_STRLEN);
+
+    // ~21 KB of pre-rendered <option> tags for every Belgian station
     httpd_resp_send_chunk(req, STATIONS_BE_HTML_OPTIONS,
                           STATIONS_BE_HTML_OPTIONS_LEN);
     httpd_resp_send_chunk(req, HTML_TAIL, HTTPD_RESP_USE_STRLEN);
