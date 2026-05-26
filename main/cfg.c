@@ -14,6 +14,7 @@
 #define K_SSID   "wifi_ssid"
 #define K_PASS   "wifi_pass"
 #define K_STAT   "station"
+#define K_LANG   "language"
 
 static const char *TAG = "cfg";
 
@@ -124,6 +125,32 @@ esp_err_t cfg_erase_station(void)
     err = nvs_commit(h);
     nvs_close(h);
     ESP_LOGW(TAG, "erased stored station");
+    return err;
+}
+
+esp_err_t cfg_load_language(char *iso, size_t len)
+{
+    if (!iso || len == 0) return ESP_ERR_INVALID_ARG;
+    iso[0] = '\0';
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    size_t l = len;
+    err = nvs_get_str(h, K_LANG, iso, &l);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t cfg_save_language(const char *iso)
+{
+    if (!iso || !iso[0]) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, K_LANG, iso);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err == ESP_OK) ESP_LOGI(TAG, "saved language='%s'", iso);
     return err;
 }
 

@@ -15,6 +15,7 @@
 #include "irail_vehicle.h"
 #include "irail.h"          // for IRAIL_VIA_LEN
 #include "app_config.h"
+#include "i18n.h"
 
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -111,11 +112,23 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// Build "via A, B, C" from the stops array, skipping origin + final destination.
-// If a stop name wouldn't fit fully in out_len, it (and anything after it) is
-// silently dropped — we NEVER append "..." or any other ellipsis marker, so
-// the UI is guaranteed to only ever show full station names. The on-screen
-// page-flip in ui.c already handles long via lists by paging through them.
+// Build "via A, B, C" from the stops array, showing ONLY the stops that
+// come AFTER the timetable station in the train's direction of travel.
+// The final destination (terminus) is excluded — it's already shown as
+// the row's primary destination label.
+//
+// This is correct for both boards:
+//   - Departures: the user is at `origin`; they want to know which calls
+//     come between here and the terminus.
+//   - Arrivals:   the train arrives at `origin`; the user might transfer
+//     onward, so they want the calls AFTER our station, not the ones the
+//     train has already left behind.
+//
+// If a stop name wouldn't fit fully in out_len it (and anything after it)
+// is silently dropped — we NEVER append "..." or any other ellipsis
+// marker, so the UI is guaranteed to only ever show full station names.
+// The on-screen page-flip in ui.c already handles long via lists by
+// paging through them.
 static void format_via_from_stops(const cJSON *stops_arr,
                                   const char *origin,
                                   char *out, size_t out_len)
@@ -124,30 +137,42 @@ static void format_via_from_stops(const cJSON *stops_arr,
     if (!cJSON_IsArray(stops_arr) || out_len < 8) return;
 
     int n = cJSON_GetArraySize(stops_arr);
-    if (n < 3) return;   // origin + dest only -> no via stops
+    if (n < 3) return;   // origin + terminus only -> no via stops
 
-    // The terminus is the last stop; everything between origin and terminus
-    // (exclusive on both ends) is what we want.
-    const cJSON *last = cJSON_GetArrayItem(stops_arr, n - 1);
-    const cJSON *last_station = last ? cJSON_GetObjectItemCaseSensitive(last, "station") : NULL;
-    const char *terminus = NULL;
-    if (cJSON_IsString(last_station) && last_station->valuestring) {
-        terminus = last_station->valuestring;
+    // Find the timetable station's index in the route. If iRail's station
+    // names don't match (e.g. when the user picked a non-Dutch UI but the
+    // saved station was selected from the Dutch picker), origin_idx stays
+    // -1 and we fall back to "skip stops named like origin" so the result
+    // is degraded but never wrong.
+    int origin_idx = -1;
+    if (origin) {
+        for (int i = 0; i < n; i++) {
+            const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
+            const cJSON *station = stop ? cJSON_GetObjectItemCaseSensitive(stop, "station") : NULL;
+            if (cJSON_IsString(station) && station->valuestring &&
+                strcmp(station->valuestring, origin) == 0) {
+                origin_idx = i;
+                break;
+            }
+        }
     }
+
+    // Start from one past our station (if found) or from the very first
+    // stop (if not). Stop one short of the terminus.
+    int start = (origin_idx >= 0) ? origin_idx + 1 : 0;
+    int end   = n - 1;   // exclusive (= skip terminus)
 
     bool started = false;
     size_t cursor = snprintf(out, out_len, "via ");
-    for (int i = 0; i < n; i++) {
+    for (int i = start; i < end; i++) {
         const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
         const cJSON *station = stop ? cJSON_GetObjectItemCaseSensitive(stop, "station") : NULL;
         if (!cJSON_IsString(station) || !station->valuestring) continue;
         const char *name = station->valuestring;
-        if (origin   && strcmp(name, origin)   == 0) continue;  // skip user's station
-        if (terminus && strcmp(name, terminus) == 0) continue;  // skip terminus
+        // Fallback path: also defend against the origin name appearing
+        // in our window when we couldn't pin its index.
+        if (origin_idx < 0 && origin && strcmp(name, origin) == 0) continue;
 
-        // Compute the exact additional bytes we'd need: ", name" (or "name"
-        // for the first stop) + NUL. If it wouldn't fit, drop this stop and
-        // everything after it — never write a partial name.
         size_t need = strlen(name) + (started ? 2 : 0);   // 2 = ", "
         if (cursor + need + 1 > out_len) break;
 
@@ -161,7 +186,7 @@ static void format_via_from_stops(const cJSON *stops_arr,
         started = true;
     }
     if (!started) {
-        out[0] = '\0';   // no intermediate stops at all
+        out[0] = '\0';   // no intermediate stops at all (we may be at terminus)
     }
 }
 
@@ -193,8 +218,8 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
 
     char url[320];
     snprintf(url, sizeof(url),
-             IRAIL_VEHICLE_HOST "?id=%s&date=%s&format=json&lang=nl",
-             vehicle_id, date_buf);
+             IRAIL_VEHICLE_HOST "?id=%s&date=%s&format=json&lang=%s",
+             vehicle_id, date_buf, i18n_iso());
 
     esp_http_client_config_t cfg = {
         .url               = url,

@@ -10,6 +10,7 @@
 #include "stations.h"
 #include "demo.h"
 #include "cfg.h"
+#include "i18n.h"
 #include "provision_ap.h"
 
 #include "esp_log.h"
@@ -200,13 +201,17 @@ static bool boards_have_data(void)
 static void main_loop_task(void *arg)
 {
     time_t last_fetch = 0;
+    // Tracks the unix time of the most recent fetch that actually returned
+    // data. Drives the header traffic-light dot. Stays 0 until iRail
+    // delivers at least one entry, which paints the dot red on screen.
+    time_t last_success = 0;
     bool   was_wifi   = wifi_is_connected();
     // overlay_up tracks the current on-screen state. Initialised to true
     // because ui_build leaves the boot splash visible.
     bool   overlay_up = true;
     // Tracks the message currently displayed under the overlay, so we
     // only re-call ui_show_overlay when the text needs to change.
-    const char *overlay_msg = "Verbinding maken...";
+    const char *overlay_msg = i18n_text(TR_CONNECTING);
 
     while (1) {
         time_t now = time(NULL);
@@ -228,6 +233,13 @@ static void main_loop_task(void *arg)
             // until the data_ok gate flips below.
             ui_set_boards(s_deps_ok ? &s_deps : NULL,
                           s_arrs_ok ? &s_arrs : NULL);
+            // Only count it as a "successful" fetch (for the freshness dot)
+            // when iRail actually returned data — an HTTP-OK-but-empty
+            // response shouldn't reset the staleness clock.
+            if ((s_deps_ok && s_deps.count > 0) ||
+                (s_arrs_ok && s_arrs.count > 0)) {
+                last_success = now;
+            }
         }
 
         // Desired state: timetable only visible when wifi is associated AND
@@ -244,11 +256,11 @@ static void main_loop_task(void *arg)
             // Pick the right message for *why* we're hiding the timetable.
             const char *new_msg;
             if (!wifi_ok) {
-                new_msg = "Verbinding hervatten...";
+                new_msg = i18n_text(TR_RECONNECTING);
             } else if (last_fetch == 0) {
-                new_msg = "Verbinding maken...";
+                new_msg = i18n_text(TR_CONNECTING);
             } else {
-                new_msg = "Treindata ophalen...";
+                new_msg = i18n_text(TR_FETCHING_DATA);
             }
             if (!overlay_up || overlay_msg != new_msg) {
                 ui_show_overlay(new_msg);
@@ -258,6 +270,7 @@ static void main_loop_task(void *arg)
         }
 
         ui_tick_status(wifi_ok);
+        ui_tick_freshness(last_success);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -273,10 +286,11 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(bsp_init());
+    cfg_init();
+    i18n_init();                       // load saved language (default NL)
     ESP_ERROR_CHECK(ui_build());
     ui_set_mode(UI_MODE_DEPARTURES);   // initial tab
     ui_tick_status(false);
-    cfg_init();
 
 #ifndef CONFIG_DEMO_MODE
     // No Wi-Fi creds in NVS? Bring up the SoftAP captive portal and stay
@@ -303,7 +317,7 @@ void app_main(void)
     // background reconnect logic in wifi.c. main_loop_task hides the
     // overlay on the disconnected->connected edge.
     int64_t splash_started_us = esp_timer_get_time();
-    ui_show_overlay("Verbinding maken...");
+    ui_show_overlay(i18n_text(TR_CONNECTING));
 
     esp_err_t wres = wifi_start_and_wait(20000);
     if (wres == ESP_OK) {
