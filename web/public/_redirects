@@ -1,3 +1,0 @@
-# Cloudflare Pages: SPA fallback so any path (e.g. /aalter, /brussel-zuid)
-# is served by /index.html and the client-side router takes over.
-/*    /index.html   200
