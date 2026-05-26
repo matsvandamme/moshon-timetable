@@ -55,6 +55,7 @@ enum {
     SLOT_VEHICLE,
     SLOT_PLAT,
     SLOT_TYPE,
+    SLOT_NUMBER,    // train number (e.g. "2204") shown under the type badge
     SLOT_COUNT,
 };
 
@@ -66,7 +67,7 @@ enum {
 // All rows are SYNCHRONISED via a single global tick counter — every row
 // updates at the same instant via the same lv_timer. Each row independently
 // wraps when its own pages run out.
-#define MARQUEE_INTERVAL_MS  4000
+#define MARQUEE_INTERVAL_MS  2500
 #define MAX_PAGES_PER_ROW    8
 
 typedef struct {
@@ -153,6 +154,11 @@ static const char *get_nth_stop_ptr(const char *full, int n, size_t *out_len)
 // least one stop even if it overflows alone, so a single very-long station
 // name still gets shown. Returns the index of the FIRST stop NOT included
 // (i.e. where the next page should start).
+//
+// We measure against (COL_DEST_W - VIA_PACK_MARGIN). The extra slack absorbs
+// LVGL's internal label padding and one-pixel sub-pixel rounding, so a stop
+// that "just fits" mathematically never gets truncated to "Kwat..." on screen.
+#define VIA_PACK_MARGIN  12
 static int build_via_page(const char *full, int start_stop,
                           char *out, size_t out_len)
 {
@@ -195,7 +201,7 @@ static int build_via_page(const char *full, int start_stop,
         // Always accept the first stop on a page, even if it's too long
         // alone — otherwise we'd never advance. Otherwise stop when adding
         // this one would push past the column width.
-        if (sz.x > COL_DEST_W && !first_on_page) {
+        if (sz.x > (COL_DEST_W - VIA_PACK_MARGIN) && !first_on_page) {
             break;
         }
 
@@ -223,11 +229,14 @@ static void apply_render_locked(void)
     }
 }
 
-// Periodic timer (~MARQUEE_INTERVAL_MS): advances ALL multi-page rows in
-// lockstep to the next page of their via stops. The page index is global so
-// every multi-page row always swaps text at the exact same instant.
-// Rows with one (or zero) pages stay static — single-via lines just keep
-// reading "via X" while the busier rows around them cycle.
+// Periodic timer (~MARQUEE_INTERVAL_MS): advances the SHARED page index
+// across every row in lockstep. All rows show their page-0 ("via …") at
+// tick 0, then the index climbs. A row that has fewer pages than the index
+// goes blank for the remainder of the cycle — when the longest row reaches
+// its last page the tick wraps and everyone snaps back to "via …" together.
+//
+// Rows without any via (num_pages == 0) are untouched here — render_entry
+// keeps the vehicle shortname in that slot as a fallback.
 static void marquee_tick(lv_timer_t *t)
 {
     (void)t;
@@ -239,19 +248,31 @@ static void marquee_tick(lv_timer_t *t)
         bsp_lvgl_unlock();
         return;
     }
-    s_global_page_tick++;
+
+    // Cycle length = longest row's page count, so all rows realign at 0.
+    int max_pages = 1;
+    for (int i = 0; i < N_ROWS; i++) {
+        if (s_via_state[i].num_pages > max_pages) {
+            max_pages = s_via_state[i].num_pages;
+        }
+    }
+    s_global_page_tick = (s_global_page_tick + 1) % max_pages;
 
     for (int i = 0; i < N_ROWS; i++) {
         via_state_t *s = &s_via_state[i];
-        if (s->num_pages <= 1) continue;            // 0 or 1 page: stay put
+        if (s->num_pages <= 0) continue;            // no via at all: fallback text
         lv_obj_t **slots = (lv_obj_t **)lv_obj_get_user_data(s_rows[i]);
         if (!slots || !slots[SLOT_VEHICLE]) continue;
 
-        int page_idx = s_global_page_tick % s->num_pages;
-        int start = s->page_starts[page_idx];
-        char display[IRAIL_VIA_LEN * 2];
-        build_via_page(s->full_text, start, display, sizeof(display));
-        lv_label_set_text(slots[SLOT_VEHICLE], display);
+        if (s_global_page_tick < s->num_pages) {
+            int start = s->page_starts[s_global_page_tick];
+            char display[IRAIL_VIA_LEN * 2];
+            build_via_page(s->full_text, start, display, sizeof(display));
+            lv_label_set_text(slots[SLOT_VEHICLE], display);
+        } else {
+            // This row has run out of pages this cycle — blank until wrap.
+            lv_label_set_text(slots[SLOT_VEHICLE], "");
+        }
     }
     bsp_lvgl_unlock();
 }
@@ -285,14 +306,14 @@ static void on_logo_tap(lv_event_t *e)
     apply_render_locked();
 }
 
-// 3-second hold anywhere on the screen wipes Wi-Fi credentials from NVS
-// and reboots into AP-mode provisioning. The hold time is set in bsp.c
-// via lv_indev_set_long_press_time.
+// 3-second hold anywhere on the screen wipes Wi-Fi credentials AND the
+// saved station name from NVS, then reboots into AP-mode provisioning.
+// The hold time is set in bsp.c via lv_indev_set_long_press_time.
 static void on_long_press_reset(lv_event_t *e)
 {
     (void)e;
-    ESP_LOGW(TAG_UI, "Long-press detected: erasing Wi-Fi creds + restarting");
-    cfg_erase_wifi();
+    ESP_LOGW(TAG_UI, "Long-press detected: erasing all NVS config + restarting");
+    cfg_erase_all();
     // Visual cue before the chip resets — the overlay paints almost
     // immediately even if esp_restart is queued right after.
     ui_show_overlay("Reset...");
@@ -319,6 +340,7 @@ static lv_style_t st_text_vehicle;
 static lv_style_t st_plat_box;
 static lv_style_t st_text_plat;
 static lv_style_t st_text_type;
+static lv_style_t st_text_number;       // small white digits under the type
 static lv_style_t st_wifi_indicator;
 
 static void styles_init(void)
@@ -455,6 +477,12 @@ static void styles_init(void)
     lv_style_set_text_font(&st_text_type, &lv_font_montserrat_20);
     lv_style_set_text_align(&st_text_type, LV_TEXT_ALIGN_CENTER);
 
+    // Train number — small off-white digits centered under the class.
+    lv_style_init(&st_text_number);
+    lv_style_set_text_color(&st_text_number, NMBS_OFFWHITE);
+    lv_style_set_text_font(&st_text_number, &lv_font_montserrat_14);
+    lv_style_set_text_align(&st_text_number, LV_TEXT_ALIGN_CENTER);
+
     lv_style_init(&st_wifi_indicator);
     lv_style_set_text_color(&st_wifi_indicator, NMBS_OFFWHITE);
     lv_style_set_text_font(&st_wifi_indicator, &lv_font_montserrat_14);
@@ -511,14 +539,19 @@ static lv_obj_t *build_row(lv_obj_t *parent, int idx)
     // No vertical separator lines — the real NMBS board uses whitespace
     // between columns instead of explicit dividers.
 
-    // Destination column
+    // Destination column. CLIP (not DOT) — render_entry auto-shrinks the
+    // font (20 -> 16 -> 14) until the name fits in COL_DEST_W, so we never
+    // need ellipsis truncation for the yellow destination.
     lv_obj_t *t_dest    = label(row, &st_text_dest,    "...", COL_DEST_X,  6);
-    lv_label_set_long_mode(t_dest,    LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(t_dest,    LV_LABEL_LONG_CLIP);
     lv_obj_set_width(t_dest,    COL_DEST_W);
     // Via subtitle: just a static label. The page-flip timer above swaps
     // its text every few seconds to step through stops. No LVGL marquee.
+    // CLIP (not DOT) on long_mode: build_via_page already packs stops to fit
+    // with a safety margin; CLIP guarantees no station name ever shows as
+    // "Kwat..." even if measurement and rendering disagree by a pixel.
     lv_obj_t *t_vehicle = label(row, &st_text_vehicle, "",    COL_DEST_X, 32);
-    lv_label_set_long_mode(t_vehicle, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(t_vehicle, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(t_vehicle, COL_DEST_W);
 
     // Platform yellow badge
@@ -529,10 +562,19 @@ static lv_obj_t *build_row(lv_obj_t *parent, int idx)
     lv_obj_set_style_text_align(t_plat, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(t_plat);
 
-    // Train type / class
-    lv_obj_t *t_type = label(row, &st_text_type, "", COL_TYPE_X, (ROW_H - 22) / 2);
+    // Train type / class — stacked above the train number, mirroring the
+    // way actual in-station NMBS boards present "IC" big with "2204" small
+    // underneath it.
+    lv_obj_t *t_type = label(row, &st_text_type, "", COL_TYPE_X, 4);
     lv_obj_set_width(t_type, COL_TYPE_W);
     lv_obj_set_style_text_align(t_type, LV_TEXT_ALIGN_CENTER, 0);
+
+    // Train number (e.g. "2204"). Small white digits, centered in the same
+    // column directly below the type. Empty when iRail doesn't expose a
+    // parseable number.
+    lv_obj_t *t_number = label(row, &st_text_number, "", COL_TYPE_X, 32);
+    lv_obj_set_width(t_number, COL_TYPE_W);
+    lv_obj_set_style_text_align(t_number, LV_TEXT_ALIGN_CENTER, 0);
 
     // Stash refs for fast updates
     lv_obj_t **slots = lv_malloc_zeroed(sizeof(lv_obj_t *) * SLOT_COUNT);
@@ -544,6 +586,7 @@ static lv_obj_t *build_row(lv_obj_t *parent, int idx)
     slots[SLOT_VEHICLE]   = t_vehicle;
     slots[SLOT_PLAT]      = t_plat;
     slots[SLOT_TYPE]      = t_type;
+    slots[SLOT_NUMBER]    = t_number;
     lv_obj_set_user_data(row, slots);
     return row;
 }
@@ -584,6 +627,23 @@ static void render_entry(int row_idx, lv_obj_t *row, const irail_entry_t *e)
         lv_obj_remove_style(slots[SLOT_DEST], &st_text_dest_cancel, 0);
     }
 
+    // Auto-shrink the destination font (20 -> 16 -> 14) until the name fits
+    // in COL_DEST_W. The user wants the yellow name to ALWAYS be readable on
+    // a single line — even Brussels-National-Airport or other long stations.
+    // Leave a small margin for sub-pixel rounding.
+    const lv_font_t *dest_font = &lv_font_montserrat_20;
+    {
+        lv_point_t sz;
+        lv_text_get_size(&sz, e->other_station, &lv_font_montserrat_20,
+                         0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (sz.x > COL_DEST_W - 4) {
+            lv_text_get_size(&sz, e->other_station, &lv_font_montserrat_16,
+                             0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            dest_font = (sz.x > COL_DEST_W - 4) ? &lv_font_montserrat_14
+                                                : &lv_font_montserrat_16;
+        }
+    }
+    lv_obj_set_style_text_font(slots[SLOT_DEST], dest_font, 0);
     lv_label_set_text(slots[SLOT_DEST], e->other_station);
     // Initialise the via page-flip state for this row. If there's no via,
     // show the vehicle shortname instead (e.g. "IC 2804") as a fallback.
@@ -596,11 +656,16 @@ static void render_entry(int row_idx, lv_obj_t *row, const irail_entry_t *e)
                                          vs->page_starts, MAX_PAGES_PER_ROW);
         char page[IRAIL_VIA_LEN * 2];
         if (vs->num_pages > 0) {
-            // Show the page corresponding to the *current* global tick so
-            // a new entry slots into the existing rotation cleanly.
-            int idx = s_global_page_tick % vs->num_pages;
-            build_via_page(vs->full_text, vs->page_starts[idx],
-                           page, sizeof(page));
+            // Match the synchronised cycle: if the current global tick is
+            // past this row's last page, blank for the rest of the cycle so
+            // a freshly-rendered row doesn't briefly desync the column.
+            if (s_global_page_tick < vs->num_pages) {
+                build_via_page(vs->full_text,
+                               vs->page_starts[s_global_page_tick],
+                               page, sizeof(page));
+            } else {
+                page[0] = '\0';
+            }
         } else {
             // Unparseable — show the raw string as-is.
             strncpy(page, vs->full_text, sizeof(page) - 1);
@@ -615,6 +680,12 @@ static void render_entry(int row_idx, lv_obj_t *row, const irail_entry_t *e)
     }
     lv_label_set_text(slots[SLOT_PLAT], e->platform[0] ? e->platform : "?");
     lv_label_set_text(slots[SLOT_TYPE], e->type[0] ? e->type : "");
+
+    // Extract the train number from `vehicle` (format "IC 2204"). The number
+    // is whatever follows the first space; if there is no space, leave it
+    // blank rather than echoing the type.
+    const char *space = strchr(e->vehicle, ' ');
+    lv_label_set_text(slots[SLOT_NUMBER], (space && space[1]) ? space + 1 : "");
 }
 
 static void clear_row(int row_idx, lv_obj_t *row)
@@ -631,6 +702,7 @@ static void clear_row(int row_idx, lv_obj_t *row)
     lv_label_set_text(slots[SLOT_VEHICLE], "");
     lv_label_set_text(slots[SLOT_PLAT], "");
     lv_label_set_text(slots[SLOT_TYPE], "");
+    lv_label_set_text(slots[SLOT_NUMBER], "");
     lv_obj_remove_style(slots[SLOT_DEST], &st_text_dest_cancel, 0);
 }
 
@@ -710,6 +782,12 @@ esp_err_t ui_build(void)
     // the navy timetable underneath.
     s_overlay = plain_obj(s_screen, &st_overlay_bg, 0, 0, LCD_H_RES, LCD_V_RES);
     lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    // Make the overlay itself clickable so the 3-second long-press wipes
+    // NVS even when the splash / "Verbinding maken..." screen is up —
+    // otherwise the user can't recover from a wrong-password boot loop
+    // because the body underneath is occluded.
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_overlay, on_long_press_reset, LV_EVENT_LONG_PRESSED, NULL);
     // Big NMBS logo, centred a bit above the middle.
     lv_obj_t *ovl_logo = lv_image_create(s_overlay);
     lv_image_set_src(ovl_logo, &nmbs_logo);

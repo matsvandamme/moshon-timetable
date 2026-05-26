@@ -174,15 +174,33 @@ static void do_fetch(void)
     }
 }
 
+// True iff iRail returned at least one entry (departure OR arrival). This is
+// the signal we use to dismiss the boot splash — Wi-Fi alone isn't enough,
+// the user wants to see the populated timetable before the overlay clears.
+static bool boards_have_data(void)
+{
+    return (s_deps_ok && s_deps.count > 0) ||
+           (s_arrs_ok && s_arrs.count > 0);
+}
+
 static void main_loop_task(void *arg)
 {
     time_t last_fetch = 0;
     bool   was_connected = wifi_is_connected();
+    // Tracks whether we've ever managed to populate the boards. The boot
+    // splash is held until this flips true. After that, transient empty
+    // fetches don't re-show the splash — only an explicit Wi-Fi disconnect
+    // surfaces the "Verbinding hervatten..." overlay.
+    bool   splash_dismissed = false;
 
     do_fetch();
     last_fetch = time(NULL);
     ui_set_boards(s_deps_ok ? &s_deps : NULL,
                   s_arrs_ok ? &s_arrs : NULL);
+    if (!splash_dismissed && boards_have_data()) {
+        ui_hide_overlay();
+        splash_dismissed = true;
+    }
 
     while (1) {
         time_t now = time(NULL);
@@ -191,14 +209,18 @@ static void main_loop_task(void *arg)
         // Wi-Fi state transitions drive the overlay. Only fire on EDGE so
         // we don't redundantly re-show the overlay every tick while down.
         if (now_connected && !was_connected) {
-            // Just (re)connected — drop the overlay and force a fresh fetch
-            // so the user sees up-to-date data right away.
+            // Just (re)connected — force a fresh fetch. Overlay only drops
+            // once that fetch actually yields data (matching the boot
+            // splash semantic: connected != "ready to show the board").
             ESP_LOGI(TAG_APP, "Wi-Fi reconnected");
-            ui_hide_overlay();
             do_fetch();
             last_fetch = now;
             ui_set_boards(s_deps_ok ? &s_deps : NULL,
                           s_arrs_ok ? &s_arrs : NULL);
+            if (boards_have_data()) {
+                ui_hide_overlay();
+                splash_dismissed = true;
+            }
         } else if (!now_connected && was_connected) {
             ESP_LOGW(TAG_APP, "Wi-Fi lost");
             ui_show_overlay("Verbinding hervatten...");
@@ -210,6 +232,12 @@ static void main_loop_task(void *arg)
             last_fetch = now;
             ui_set_boards(s_deps_ok ? &s_deps : NULL,
                           s_arrs_ok ? &s_arrs : NULL);
+            // If we never made it past the boot splash, every subsequent
+            // refresh is another chance to dismiss it.
+            if (!splash_dismissed && boards_have_data()) {
+                ui_hide_overlay();
+                splash_dismissed = true;
+            }
         }
 
         ui_tick_status(now_connected);
@@ -234,39 +262,51 @@ void app_main(void)
     cfg_init();
 
 #ifndef CONFIG_DEMO_MODE
-    // No Wi-Fi creds in NVS AND no compile-time fallback? Bring up the
-    // SoftAP, show setup instructions, and wait — the form's /save handler
-    // saves creds + restarts the chip into normal STA mode.
+    // No Wi-Fi creds in NVS? Bring up the SoftAP captive portal and stay
+    // parked here forever — the /save handler reboots the chip once the
+    // user submits the form. Critically: do NOT fall through to STA mode
+    // on AP-start failure; otherwise a brief AP glitch would cause us to
+    // silently re-join whatever the previous network was (silently
+    // undoing the user's long-press wipe).
     if (!cfg_has_wifi()) {
         ui_show_provisioning(PROVISION_AP_SSID, PROVISION_AP_URL);
-        if (provision_ap_start() == ESP_OK) {
-            // provision_ap_start returns immediately; let the captive
-            // portal handle the rest. Idle here forever (the /save
-            // handler will esp_restart() once the user submits).
-            while (1) vTaskDelay(pdMS_TO_TICKS(60000));
+        esp_err_t apr = provision_ap_start();
+        if (apr != ESP_OK) {
+            ESP_LOGE(TAG_APP, "AP provisioning failed: %s",
+                     esp_err_to_name(apr));
+            ui_show_overlay("Setup mode error");
         }
-        ESP_LOGE(TAG_APP, "AP provisioning failed to start");
+        while (1) vTaskDelay(pdMS_TO_TICKS(60000));  // hold the splash, no fall-through
     }
 #endif
 
-    // Show the connect-to-Wi-Fi splash while we attempt association.
+    // Show the connect-to-Wi-Fi splash while we attempt association. The
+    // overlay stays up until association actually succeeds — whether that
+    // happens in this 20 s window or several minutes later via the
+    // background reconnect logic in wifi.c. main_loop_task hides the
+    // overlay on the disconnected->connected edge.
     int64_t splash_started_us = esp_timer_get_time();
     ui_show_overlay("Verbinding maken...");
 
-    if (wifi_start_and_wait(20000) == ESP_OK) {
+    esp_err_t wres = wifi_start_and_wait(20000);
+    if (wres == ESP_OK) {
         time_sync_start();
         vTaskDelay(pdMS_TO_TICKS(1500));   // let SNTP land before first fetch labels things
-        // Hold the splash on screen for at least SPLASH_MIN_VISIBLE_MS so a
-        // user can actually read the build info even when Wi-Fi joins fast.
-        int64_t elapsed_ms = (esp_timer_get_time() - splash_started_us) / 1000;
-        if (elapsed_ms < SPLASH_MIN_VISIBLE_MS) {
-            vTaskDelay(pdMS_TO_TICKS(SPLASH_MIN_VISIBLE_MS - (int)elapsed_ms));
-        }
-        ui_hide_overlay();                  // got Wi-Fi -> reveal the board
     } else {
-        ESP_LOGE(TAG_APP, "Wi-Fi did not come up — task will keep retrying in background");
-        ui_show_overlay("Verbinding mislukt...");
+        ESP_LOGW(TAG_APP, "Wi-Fi not up after 20 s — splash stays visible, retries continue");
     }
+
+    // Always hold the splash for at least SPLASH_MIN_VISIBLE_MS so the build
+    // info is readable even when Wi-Fi joins fast.
+    int64_t elapsed_ms = (esp_timer_get_time() - splash_started_us) / 1000;
+    if (elapsed_ms < SPLASH_MIN_VISIBLE_MS) {
+        vTaskDelay(pdMS_TO_TICKS(SPLASH_MIN_VISIBLE_MS - (int)elapsed_ms));
+    }
+
+    // Leave the splash up here — main_loop_task drops it the moment iRail
+    // returns at least one entry. Wi-Fi alone isn't enough: the user wants
+    // to see the populated timetable before the overlay clears.
+    (void)wres;
 
     // Pin the network/UI loop to core 1 alongside LVGL. CPU 0 stays free for
     // Wi-Fi, lwIP and IDLE0, so the task watchdog doesn't trip during the

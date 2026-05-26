@@ -38,6 +38,13 @@ bool      cfg_has_wifi(void);
 // e.g. "Brussels-South"). Returns ESP_ERR_NVS_NOT_FOUND if never set.
 esp_err_t cfg_load_station(char *name, size_t len);
 esp_err_t cfg_save_station(const char *name);
+esp_err_t cfg_erase_station(void);
+
+// ---------- Wipe everything ----------
+
+// Convenience: erase Wi-Fi creds AND station. Used by the on-screen
+// long-press reset so the next boot lands cleanly in AP provisioning.
+esp_err_t cfg_erase_all(void);
 
 #ifdef __cplusplus
 }

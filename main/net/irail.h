@@ -12,7 +12,10 @@ extern "C" {
 #define IRAIL_MAX_ENTRIES   12
 #define IRAIL_FIELD_LEN     48
 #define IRAIL_VEHID_LEN     32     // e.g. "BE.NMBS.IC2803"
-#define IRAIL_VIA_LEN       128    // pre-formatted "via X, Y, Z" subtitle
+#define IRAIL_VIA_LEN       256    // pre-formatted "via X, Y, Z" subtitle —
+                                   // generous so late stops aren't dropped at
+                                   // the source (the on-screen paginator in
+                                   // ui.c handles wide via lines visually)
 
 typedef struct {
     time_t   scheduled;                      // absolute time (unix)

@@ -114,3 +114,27 @@ esp_err_t cfg_save_station(const char *name)
     if (err == ESP_OK) ESP_LOGI(TAG, "saved station='%s'", name);
     return err;
 }
+
+esp_err_t cfg_erase_station(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    nvs_erase_key(h, K_STAT);
+    err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "erased stored station");
+    return err;
+}
+
+esp_err_t cfg_erase_all(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    nvs_erase_all(h);   // nukes every key in this namespace
+    err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "erased the entire 'moshon' NVS namespace");
+    return err;
+}
