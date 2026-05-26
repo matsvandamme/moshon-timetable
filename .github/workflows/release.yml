@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to publish (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  release:
+    name: Build + publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required for creating the Release
+    steps:
+      - uses: actions/checkout@v4
+
+      # wifi_secrets.h is gitignored — provide a placeholder so wifi.c compiles.
+      - name: Provision placeholder wifi_secrets.h
+        run: cp main/wifi_secrets.h.example main/wifi_secrets.h
+
+      - name: ESP-IDF build (esp32s3)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.2
+          target: esp32s3
+          path: '.'
+
+      # Single-file flash image (bootloader + partition + app pre-merged)
+      # so end users can `esptool.py write_flash 0x0 moshon_timetable-full.bin`
+      # in one shot.
+      - name: Install esptool
+        run: pip install esptool
+
+      - name: Merge firmware images
+        working-directory: build
+        run: |
+          esptool.py --chip esp32s3 merge_bin \
+            -o moshon_timetable-full.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0    bootloader/bootloader.bin \
+            0x8000 partition_table/partition-table.bin \
+            0x10000 moshon_timetable.bin
+          ls -lh moshon_timetable-full.bin
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/moshon_timetable.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flash_args
+            build/moshon_timetable-full.bin
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
