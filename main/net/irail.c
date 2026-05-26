@@ -221,12 +221,12 @@ static esp_err_t fetch(const char *arrdep, time_t for_time, irail_board_t *out)
                  (unsigned)(tm.tm_hour & 0x3F),
                  (unsigned)(tm.tm_min  & 0x3F));
         snprintf(url, sizeof(url),
-                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=en"
+                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=nl"
                  "&alerts=false&date=%s&time=%s",
                  st->query_name, arrdep, date_buf, time_buf);
     } else {
         snprintf(url, sizeof(url),
-                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=en&alerts=false",
+                 IRAIL_HOST_PATH "?station=%s&arrdep=%s&format=json&lang=nl&alerts=false",
                  st->query_name, arrdep);
     }
 

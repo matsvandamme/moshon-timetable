@@ -185,7 +185,7 @@ esp_err_t irail_vehicle_get_via(const char *vehicle_id, time_t when,
 
     char url[320];
     snprintf(url, sizeof(url),
-             IRAIL_VEHICLE_HOST "?id=%s&date=%s&format=json&lang=en",
+             IRAIL_VEHICLE_HOST "?id=%s&date=%s&format=json&lang=nl",
              vehicle_id, date_buf);
 
     esp_http_client_config_t cfg = {

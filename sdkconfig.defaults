@@ -39,6 +39,14 @@ CONFIG_ESP_TLS_USING_MBEDTLS=y
 # --- HTTP client ---
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 
+# --- HTTP server (AP-mode captive portal) ---
+# Default limits (512 bytes) are too small for modern phones' captive
+# portal POST requests: iOS Safari sends a User-Agent + Cookie + Referer
+# combination that easily exceeds it, triggering "header fields are too
+# long" 431 responses when the user hits Save in the setup form.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
+
 # --- Hardware crypto acceleration ---
 # Without these the RSA work in the TLS handshake against api.irail.be takes
 # several seconds and trips the task watchdog. The ESP32-S3 has hardware MPI

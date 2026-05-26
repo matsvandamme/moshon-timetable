@@ -18,7 +18,7 @@ import unicodedata
 import urllib.request
 
 IRAIL_URL = (
-    "https://api.irail.be/v1/stations/?format=json&lang=en"
+    "https://api.irail.be/v1/stations/?format=json&lang=nl"
 )
 USER_AGENT = (
     "moshon-timetable-build-script/0.1 "

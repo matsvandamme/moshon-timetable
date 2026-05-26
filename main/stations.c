@@ -1,5 +1,7 @@
 #include "stations.h"
 #include "sdkconfig.h"
+#include "cfg.h"
+#include <string.h>
 
 // Curated list of common Belgian stations. Held as a single array so the
 // compiler doesn't whine about the entries we don't select via Kconfig
@@ -44,8 +46,33 @@ static const station_t stations[] = {
 #endif
 };
 
+// If the user provisioned a station via the AP setup form, NVS holds the
+// chosen Dutch name. Prefer that over the Kconfig default — otherwise the
+// device would keep displaying "Aalter" even after a user typed something
+// else in the captive portal. Display name == query name (iRail accepts
+// both Dutch and French/English names).
+static char        s_nvs_name[64];
+static station_t   s_nvs_station;
+static bool        s_nvs_loaded;
+
+static const station_t *try_nvs_station(void)
+{
+    if (!s_nvs_loaded) {
+        s_nvs_loaded = true;
+        if (cfg_load_station(s_nvs_name, sizeof(s_nvs_name)) == ESP_OK
+            && s_nvs_name[0]) {
+            s_nvs_station.display_name = s_nvs_name;
+            s_nvs_station.query_name   = s_nvs_name;
+        }
+    }
+    return s_nvs_name[0] ? &s_nvs_station : NULL;
+}
+
 const station_t *station_get_active(void)
 {
+    const station_t *nvs = try_nvs_station();
+    if (nvs) return nvs;
+
 #if   defined(CONFIG_STATION_AALTER)
     return &stations[IDX_AALTER];
 #elif defined(CONFIG_STATION_BRUSSELS_SOUTH)
