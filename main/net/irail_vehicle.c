@@ -112,13 +112,16 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 }
 
 // Build "via A, B, C" from the stops array, skipping origin + final destination.
-// Truncates at out_len with a "..." suffix if needed.
+// If a stop name wouldn't fit fully in out_len, it (and anything after it) is
+// silently dropped — we NEVER append "..." or any other ellipsis marker, so
+// the UI is guaranteed to only ever show full station names. The on-screen
+// page-flip in ui.c already handles long via lists by paging through them.
 static void format_via_from_stops(const cJSON *stops_arr,
                                   const char *origin,
                                   char *out, size_t out_len)
 {
     out[0] = '\0';
-    if (!cJSON_IsArray(stops_arr)) return;
+    if (!cJSON_IsArray(stops_arr) || out_len < 8) return;
 
     int n = cJSON_GetArraySize(stops_arr);
     if (n < 3) return;   // origin + dest only -> no via stops
@@ -133,27 +136,32 @@ static void format_via_from_stops(const cJSON *stops_arr,
     }
 
     bool started = false;
-    size_t cursor = 0;
-    cursor += snprintf(out + cursor, out_len - cursor, "via ");
-    for (int i = 0; i < n && cursor < out_len - 4; i++) {
+    size_t cursor = snprintf(out, out_len, "via ");
+    for (int i = 0; i < n; i++) {
         const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
         const cJSON *station = stop ? cJSON_GetObjectItemCaseSensitive(stop, "station") : NULL;
         if (!cJSON_IsString(station) || !station->valuestring) continue;
         const char *name = station->valuestring;
         if (origin   && strcmp(name, origin)   == 0) continue;  // skip user's station
         if (terminus && strcmp(name, terminus) == 0) continue;  // skip terminus
+
+        // Compute the exact additional bytes we'd need: ", name" (or "name"
+        // for the first stop) + NUL. If it wouldn't fit, drop this stop and
+        // everything after it — never write a partial name.
+        size_t need = strlen(name) + (started ? 2 : 0);   // 2 = ", "
+        if (cursor + need + 1 > out_len) break;
+
         if (started) {
-            cursor += snprintf(out + cursor, out_len - cursor, ", %s", name);
-        } else {
-            cursor += snprintf(out + cursor, out_len - cursor, "%s", name);
-            started = true;
+            memcpy(out + cursor, ", ", 2);
+            cursor += 2;
         }
+        memcpy(out + cursor, name, strlen(name));
+        cursor += strlen(name);
+        out[cursor] = '\0';
+        started = true;
     }
     if (!started) {
         out[0] = '\0';   // no intermediate stops at all
-    } else if (cursor >= out_len - 4) {
-        // Got truncated: clip and add an ellipsis the user can read.
-        snprintf(out + out_len - 5, 5, "...");
     }
 }
 

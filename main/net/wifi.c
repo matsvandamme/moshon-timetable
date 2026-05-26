@@ -1,12 +1,10 @@
 #include "wifi.h"
 #include "cfg.h"
 #include "app_config.h"
-// wifi_secrets.h is still consulted as a one-time migration path on first
-// boot after this refactor, so a user who already had creds compiled in
-// doesn't have to re-enter them via the AP form.
-#if __has_include("wifi_secrets.h")
-#include "wifi_secrets.h"
-#endif
+// wifi_secrets.h is intentionally NOT included any more — credentials live
+// in NVS exclusively, populated by the AP-mode setup form. The old
+// compile-time migration silently rewrote NVS on the next STA boot, which
+// caused a long-press wipe to be undone within seconds.
 
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -23,10 +21,13 @@
 
 #define WIFI_BIT_CONNECTED   BIT0
 #define WIFI_BIT_FAIL        BIT1
-#define WIFI_MAX_RETRIES     5
+// No retry cap: the user wants the "Verbinding maken..." splash to stay up
+// until Wi-Fi actually associates. Capping retries would cause the radio to
+// give up after a handful of disconnects (e.g. AP briefly down) and the
+// device would sit on the splash forever with no further connection attempts.
+// Now we reconnect on every WIFI_EVENT_STA_DISCONNECTED, indefinitely.
 
 static EventGroupHandle_t s_wifi_event_group = NULL;
-static int s_retry_count = 0;
 static bool s_connected = false;
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -39,14 +40,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
                 s_connected = false;
-                if (s_retry_count < WIFI_MAX_RETRIES) {
-                    s_retry_count++;
-                    ESP_LOGW(TAG_WIFI, "Disconnected — retry %d/%d", s_retry_count, WIFI_MAX_RETRIES);
-                    esp_wifi_connect();
-                } else {
-                    ESP_LOGE(TAG_WIFI, "Giving up after %d retries", WIFI_MAX_RETRIES);
-                    xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_FAIL);
-                }
+                ESP_LOGW(TAG_WIFI, "Disconnected — reconnecting");
+                esp_wifi_connect();
                 break;
             default: break;
         }
@@ -54,7 +49,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG_WIFI, "Got IP " IPSTR, IP2STR(&event->ip_info.ip));
         s_connected = true;
-        s_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_CONNECTED);
     }
 }
@@ -86,28 +80,16 @@ esp_err_t wifi_start_and_wait(uint32_t timeout_ms)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL, NULL));
 
-    // Resolve credentials: NVS first; if empty, migrate from any compile-time
-    // WIFI_SSID/WIFI_PASSWORD that isn't the placeholder; else fail (caller
-    // is expected to enter AP-mode provisioning).
+    // Resolve credentials: NVS only. main.c is responsible for routing the
+    // boot into AP-mode provisioning when NVS is empty, so by the time this
+    // function is reached we expect creds to be there.
     char ssid_buf[CFG_FIELD_MAX] = {0};
     char pass_buf[CFG_FIELD_MAX] = {0};
     esp_err_t cerr = cfg_load_wifi(ssid_buf, sizeof(ssid_buf),
                                    pass_buf, sizeof(pass_buf));
     if (cerr != ESP_OK || ssid_buf[0] == '\0') {
-#if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
-        const char *cs = WIFI_SSID;
-        const char *cp = WIFI_PASSWORD;
-        if (cs[0] && strstr(cs, "REPLACE_WITH") == NULL) {
-            ESP_LOGW(TAG_WIFI, "Migrating compile-time creds to NVS");
-            strncpy(ssid_buf, cs, sizeof(ssid_buf) - 1);
-            strncpy(pass_buf, cp, sizeof(pass_buf) - 1);
-            cfg_save_wifi(ssid_buf, pass_buf);
-        }
-#endif
-        if (ssid_buf[0] == '\0') {
-            ESP_LOGE(TAG_WIFI, "No Wi-Fi credentials available");
-            return ESP_ERR_NOT_FOUND;
-        }
+        ESP_LOGE(TAG_WIFI, "No Wi-Fi credentials in NVS");
+        return ESP_ERR_NOT_FOUND;
     }
 
     wifi_config_t cfg = { 0 };
