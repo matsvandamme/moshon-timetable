@@ -36,7 +36,6 @@ idf_component_register(
         driver
         esp_timer
         esp_psram
-        esp_mm
         esp_https_ota
         app_update
         lwip

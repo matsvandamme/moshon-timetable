@@ -240,6 +240,33 @@ static void apply_header_title_locked(void)
                                 ? TR_DEPARTURES : TR_ARRIVALS));
 }
 
+// 1 Hz LVGL timer that ticks the wall clock + blinks the colon. Lives
+// inside the LVGL task so its cadence is decoupled from main_loop_task —
+// previously the clock froze for several seconds whenever the network
+// fetch was busy doing TLS handshakes against iRail. The colon now blinks
+// reliably regardless of what the network is up to.
+static void clock_tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    static bool blink_on = false;
+    blink_on = !blink_on;
+
+    if (!s_header_hh || !s_header_mm || !s_header_sep) return;
+    // LVGL timers run inside the LVGL task which already holds the lock;
+    // no extra bsp_lvgl_lock() needed here.
+
+    struct tm tm;
+    time_t now = time(NULL);
+    localtime_r(&now, &tm);
+    char hh[4], mm[4];
+    snprintf(hh, sizeof(hh), "%02d", tm.tm_hour);
+    snprintf(mm, sizeof(mm), "%02d", tm.tm_min);
+    lv_label_set_text(s_header_hh, hh);
+    lv_label_set_text(s_header_mm, mm);
+    lv_obj_set_style_text_color(s_header_sep,
+        blink_on ? NMBS_WHITE : NMBS_BLUE_DEEP, 0);
+}
+
 static void apply_render_locked(void)
 {
     const irail_board_t *b = (s_mode == UI_MODE_DEPARTURES) ? s_dep_board : s_arr_board;
@@ -940,6 +967,9 @@ esp_err_t ui_build(void)
     // Page-flip timer for the via stops. Runs inside the LVGL task so it
     // already holds the lock — but we re-acquire defensively in the cb.
     lv_timer_create(marquee_tick, MARQUEE_INTERVAL_MS, NULL);
+    // 500 ms = colon flips every half-second so a full HH:MM:on -> off
+    // cycle is one second per the user's preference.
+    lv_timer_create(clock_tick_cb, 500, NULL);
 
     bsp_lvgl_unlock();
     return ESP_OK;
@@ -1116,25 +1146,11 @@ void ui_tick_freshness(time_t last_success_unix)
 
 void ui_tick_status(bool wifi_ok)
 {
-    static bool blink_on = false;
-    blink_on = !blink_on;
-
+    // Clock + colon are driven by an LVGL timer (see clock_tick_cb) so
+    // they keep ticking even while main_loop_task is blocked on a long
+    // iRail TLS handshake. This call now only refreshes the wifi
+    // indicator, which is cheap and edge-driven from main_loop_task.
     if (!bsp_lvgl_lock(50)) return;
-
-    if (s_header_hh && s_header_mm && s_header_sep) {
-        struct tm tm;
-        time_t now = time(NULL);
-        localtime_r(&now, &tm);
-        char hh[4], mm[4];
-        snprintf(hh, sizeof(hh), "%02d", tm.tm_hour);
-        snprintf(mm, sizeof(mm), "%02d", tm.tm_min);
-        lv_label_set_text(s_header_hh, hh);
-        lv_label_set_text(s_header_mm, mm);
-        // Colon: white on alternating ticks, header-bg-coloured on the
-        // others so it visually disappears without altering layout.
-        lv_obj_set_style_text_color(s_header_sep,
-            blink_on ? NMBS_WHITE : NMBS_BLUE_DEEP, 0);
-    }
     if (s_header_wifi) {
         lv_label_set_text(s_header_wifi,
             wifi_ok ? LV_SYMBOL_WIFI : LV_SYMBOL_WARNING);

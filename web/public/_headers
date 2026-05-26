@@ -1,0 +1,18 @@
+# Security + caching headers applied by Cloudflare Pages.
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: interest-cohort=()
+  Cross-Origin-Opener-Policy: same-origin
+
+# Long-cache the immutable assets. index.html stays uncached so a deploy
+# is picked up on the next visit without needing a hard refresh.
+/style.css
+  Cache-Control: public, max-age=86400, must-revalidate
+/app.js
+  Cache-Control: public, max-age=86400, must-revalidate
+/icon.svg
+  Cache-Control: public, max-age=604800
+/index.html
+  Cache-Control: no-cache
