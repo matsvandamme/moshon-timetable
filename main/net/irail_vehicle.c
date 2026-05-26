@@ -13,7 +13,7 @@
 // refreshes are pure cache hits.
 
 #include "irail_vehicle.h"
-#include "irail.h"          // for IRAIL_VIA_LEN
+#include "irail.h"          // for IRAIL_VIA_LEN + irail_active_station_id()
 #include "app_config.h"
 #include "i18n.h"
 
@@ -119,23 +119,44 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// Build "via A, B, C" from the stops array, showing ONLY the stops that
-// come AFTER the timetable station in the train's direction of travel.
-// The final destination (terminus) is excluded — it's already shown as
-// the row's primary destination label.
+// Returns true iff iRail marked this stop as already arrived at. Handles
+// both number ("arrived": 1) and string ("arrived": "1") encodings that
+// have been observed in /vehicle/ responses across the years.
+static bool stop_already_arrived(const cJSON *stop)
+{
+    if (!stop) return false;
+    const cJSON *j = cJSON_GetObjectItemCaseSensitive(stop, "arrived");
+    if (!j) return false;
+    if (cJSON_IsNumber(j))   return j->valueint != 0;
+    if (cJSON_IsString(j) && j->valuestring) {
+        return j->valuestring[0] == '1';
+    }
+    return false;
+}
+
+// Build "via A, B, C" from the stops array. The two board flavours produce
+// different lists:
 //
-// This is correct for both boards:
-//   - Departures: the user is at `origin`; they want to know which calls
-//     come between here and the terminus.
-//   - Arrivals:   the train arrives at `origin`; the user might transfer
-//     onward, so they want the calls AFTER our station, not the ones the
-//     train has already left behind.
+// DEPARTURES (include_terminus == false):
+//   Stops that come AFTER our station in the train's direction of travel,
+//   excluding the terminus (already shown as the row's yellow label).
+//   Stops the train has already called at are never included.
 //
-// If a stop name wouldn't fit fully in out_len it (and anything after it)
-// is silently dropped — we NEVER append "..." or any other ellipsis
-// marker, so the UI is guaranteed to only ever show full station names.
-// The on-screen page-flip in ui.c already handles long via lists by
-// paging through them.
+// ARRIVALS (include_terminus == true):
+//   Every stop the train STILL HAS to call at — starting from the first
+//   stop iRail hasn't marked `arrived=1`, through our station, through the
+//   stops after our station, ending at the terminus. The user gets the
+//   train's remaining future schedule, not just the post-our-station tail.
+//
+// Matching our station inside the route uses the canonical iRail
+// stationinfo.id (language-independent); falls back to a name match when
+// no ID is cached. If neither matches in DEPARTURES mode, the result is
+// empty — we'd rather show no via than risk leaking pre-our-station
+// stops. ARRIVALS mode doesn't need a match because it walks the whole
+// not-yet-arrived window.
+//
+// Long station names that wouldn't fit in out_len drop the partial stop
+// and everything after it; no ellipsis is ever written.
 static void format_via_from_stops(const cJSON *stops_arr,
                                   const char *origin,
                                   bool include_terminus,
@@ -145,32 +166,58 @@ static void format_via_from_stops(const cJSON *stops_arr,
     if (!cJSON_IsArray(stops_arr) || out_len < 8) return;
 
     int n = cJSON_GetArraySize(stops_arr);
-    if (n < 3) return;   // origin + terminus only -> no via stops
+    if (n < 2) return;   // need at least origin + terminus
 
-    // Find the timetable station's index in the route. If iRail's station
-    // names don't match (e.g. when the user picked a non-Dutch UI but the
-    // saved station was selected from the Dutch picker), origin_idx stays
-    // -1 and we fall back to "skip stops named like origin" so the result
-    // is degraded but never wrong.
-    int origin_idx = -1;
-    if (origin) {
+    int start = 0;
+    int end   = 0;
+
+    if (include_terminus) {
+        // Arrivals: start from the first stop the train hasn't visited yet,
+        // include everything up to and including the terminus.
+        start = 0;
         for (int i = 0; i < n; i++) {
-            const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
-            const cJSON *station = stop ? cJSON_GetObjectItemCaseSensitive(stop, "station") : NULL;
-            if (cJSON_IsString(station) && station->valuestring &&
-                strcmp(station->valuestring, origin) == 0) {
-                origin_idx = i;
+            if (stop_already_arrived(cJSON_GetArrayItem(stops_arr, i))) {
+                start = i + 1;
+            } else {
                 break;
             }
         }
+        end = n;
+    } else {
+        // Departures: find our station, emit only stops after it (exclude
+        // the terminus, which is already the row's yellow destination).
+        const char *our_id = irail_active_station_id();
+        bool have_id = (our_id && our_id[0]);
+
+        int origin_idx = -1;
+        for (int i = 0; i < n; i++) {
+            const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
+            if (!stop) continue;
+            if (have_id) {
+                const cJSON *si = cJSON_GetObjectItemCaseSensitive(stop, "stationinfo");
+                const cJSON *id_j = cJSON_IsObject(si)
+                    ? cJSON_GetObjectItemCaseSensitive(si, "id") : NULL;
+                if (cJSON_IsString(id_j) && id_j->valuestring &&
+                    strcmp(id_j->valuestring, our_id) == 0) {
+                    origin_idx = i;
+                    break;
+                }
+            } else if (origin) {
+                const cJSON *station = cJSON_GetObjectItemCaseSensitive(stop, "station");
+                if (cJSON_IsString(station) && station->valuestring &&
+                    strcmp(station->valuestring, origin) == 0) {
+                    origin_idx = i;
+                    break;
+                }
+            }
+        }
+        if (origin_idx < 0) return;   // strict: never leak pre-our stops
+
+        start = origin_idx + 1;
+        end   = n - 1;                // exclude terminus
     }
 
-    // Start from one past our station (if found) or from the very first
-    // stop (if not). For arrivals (include_terminus == true) we run all
-    // the way to the end so the final destination shows up as the last
-    // via stop; for departures we stop one short.
-    int start = (origin_idx >= 0) ? origin_idx + 1 : 0;
-    int end   = include_terminus ? n : n - 1;   // exclusive
+    if (start >= end) return;
 
     bool started = false;
     size_t cursor = snprintf(out, out_len, "via ");
@@ -179,9 +226,6 @@ static void format_via_from_stops(const cJSON *stops_arr,
         const cJSON *station = stop ? cJSON_GetObjectItemCaseSensitive(stop, "station") : NULL;
         if (!cJSON_IsString(station) || !station->valuestring) continue;
         const char *name = station->valuestring;
-        // Fallback path: also defend against the origin name appearing
-        // in our window when we couldn't pin its index.
-        if (origin_idx < 0 && origin && strcmp(name, origin) == 0) continue;
 
         size_t need = strlen(name) + (started ? 2 : 0);   // 2 = ", "
         if (cursor + need + 1 > out_len) break;

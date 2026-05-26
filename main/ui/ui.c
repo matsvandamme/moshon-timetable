@@ -68,7 +68,7 @@ enum {
 // All rows are SYNCHRONISED via a single global tick counter — every row
 // updates at the same instant via the same lv_timer. Each row independently
 // wraps when its own pages run out.
-#define MARQUEE_INTERVAL_MS  2500
+#define MARQUEE_INTERVAL_MS  1800
 #define MAX_PAGES_PER_ROW    8
 
 typedef struct {

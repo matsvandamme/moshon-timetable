@@ -48,6 +48,14 @@ esp_err_t irail_fetch(const char *arrdep, time_t for_time, irail_board_t *out);
 esp_err_t irail_fetch_departures(irail_board_t *out);
 esp_err_t irail_fetch_arrivals(irail_board_t *out);
 
+// Latest iRail station ID (e.g. "BE.NMBS.008892007") for the queried
+// station. Populated as a side effect of irail_fetch when the response
+// contains a stationinfo block. Returns "" until the first successful
+// fetch. Used by irail_vehicle.c to match the user's station in the
+// /vehicle/ stops array independent of UI language — station ID is
+// canonical, station name is not.
+const char *irail_active_station_id(void);
+
 #ifdef __cplusplus
 }
 #endif
