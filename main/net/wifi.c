@@ -120,21 +120,49 @@ bool wifi_is_connected(void)
 esp_err_t time_sync_start(void)
 {
     ESP_LOGI(TAG_WIFI, "Starting SNTP");
-    // NTP_SERVER_1 may come from wifi_secrets.h on legacy local builds; if
-    // the file is gone fall back to a sensible default.
 #ifndef NTP_SERVER_1
 #define NTP_SERVER_1 "be.pool.ntp.org"
 #endif
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER_1);
+    // server_from_dhcp requires CONFIG_LWIP_DHCP_GET_NTP_SRV — gate on
+    // that so the init doesn't fail and leave SNTP completely off when
+    // someone (or sdkconfig overrides) flip the Kconfig back off.
+#ifdef CONFIG_LWIP_DHCP_GET_NTP_SRV
     cfg.server_from_dhcp = true;
     cfg.renew_servers_after_new_IP = true;
+#endif
     cfg.start = true;
     cfg.sync_cb = NULL;
-    esp_netif_sntp_init(&cfg);
+
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_WIFI, "esp_netif_sntp_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
     esp_netif_sntp_start();
 
     // Europe/Brussels — CET/CEST.
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();
+
+    // Block briefly (up to 8 s) for the first SYNC so on-screen times
+    // are correct from the very first paint, instead of showing 01:00 or
+    // similar until the next iRail fetch happens to land after sync.
+    int retry = 0;
+    const int retry_max = 16;
+    while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(500)) == ESP_ERR_TIMEOUT
+           && ++retry < retry_max) {
+        // keep waiting
+    }
+    if (retry >= retry_max) {
+        ESP_LOGW(TAG_WIFI, "SNTP first sync did not land in 8 s; clock may lag");
+    } else {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+        ESP_LOGI(TAG_WIFI, "SNTP synced, local time = %s", buf);
+    }
     return ESP_OK;
 }

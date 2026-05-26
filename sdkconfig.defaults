@@ -25,6 +25,14 @@ CONFIG_SPIRAM_RODATA=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
 
+# --- DHCP-supplied NTP server ---
+# Some home routers hand out an NTP server in the DHCP lease (option 42).
+# Enabling this lets esp_netif_sntp_init pick it up alongside our
+# hardcoded be.pool.ntp.org fallback. Without it, the SNTP init silently
+# fails when our code asks for server_from_dhcp = true, the clock stays
+# at the 1970 epoch, and every on-screen time is wrong.
+CONFIG_LWIP_DHCP_GET_NTP_SRV=y
+
 # --- USB CDC for native USB serial (matches the COM port enumerated on Windows) ---
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
@@ -102,6 +110,10 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_36=y
+
+# QR-code widget — used on the splash to render a scannable link to
+# the project's GitHub repo. Bundles a small (~10 KB) qrcodegen blob.
+CONFIG_LV_USE_QRCODE=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=y
 CONFIG_LV_USE_FLEX=y
 CONFIG_LV_USE_GRID=y

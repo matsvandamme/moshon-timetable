@@ -358,8 +358,10 @@ void app_main(void)
 
     esp_err_t wres = wifi_start_and_wait(20000);
     if (wres == ESP_OK) {
+        // time_sync_start() now blocks up to 8 s for the first SNTP sync
+        // before returning, so the on-screen clock + iRail "date" param
+        // are correct from the first paint.
         time_sync_start();
-        vTaskDelay(pdMS_TO_TICKS(1500));   // let SNTP land before first fetch labels things
         // Bring up the on-network settings page + OTA endpoint + mDNS so
         // the user can configure the device from a browser on their LAN
         // without ever needing the AP-mode portal again.
