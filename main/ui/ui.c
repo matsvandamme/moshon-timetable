@@ -21,6 +21,7 @@
 #include "cfg.h"
 #include "i18n.h"
 #include "esp_system.h"
+#include "libs/qrcode/lv_qrcode.h"
 
 #include "esp_log.h"
 #include <stdio.h>
@@ -897,8 +898,10 @@ esp_err_t ui_build(void)
     lv_obj_remove_style_all(s_overlay_info);
     lv_obj_set_style_text_color(s_overlay_info, NMBS_GREY, 0);
     lv_obj_set_style_text_font(s_overlay_info, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(s_overlay_info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_width(s_overlay_info, LCD_H_RES - 20);
+    lv_obj_set_style_text_align(s_overlay_info, LV_TEXT_ALIGN_LEFT, 0);
+    // Width leaves a 90 px gap on the right for the QR code below. Without
+    // this, the centered text drifts under the QR and overlaps it.
+    lv_obj_set_width(s_overlay_info, LCD_H_RES - 110);
     {
         char info[256];
         // ASCII-only — Montserrat 14 doesn't have U+00B7 middle dot or
@@ -915,7 +918,20 @@ esp_err_t ui_build(void)
                  APP_HOMEPAGE_SHORT);
         lv_label_set_text(s_overlay_info, info);
     }
-    lv_obj_align(s_overlay_info, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_align(s_overlay_info, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+
+    // Scannable QR code linking back to the project's GitHub page.
+    // Anchored to the bottom-right of the splash, sized 70x70 so it
+    // pulls focus without crowding the build-info block. White-on-dark
+    // for max scan contrast (LVGL's qrcode widget takes BG and FG
+    // colours explicitly).
+    lv_obj_t *qr = lv_qrcode_create(s_overlay);
+    lv_qrcode_set_size(qr, 70);
+    lv_qrcode_set_dark_color(qr, lv_color_white());
+    lv_qrcode_set_light_color(qr, lv_color_black());
+    lv_qrcode_update(qr, APP_HOMEPAGE, strlen(APP_HOMEPAGE));
+    lv_obj_align(qr, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
     // Overlay starts VISIBLE — the splash is up from the very first paint,
     // before app_main has even configured a message. This pairs with
     // s_body starting HIDDEN to guarantee no timetable flash at boot.
