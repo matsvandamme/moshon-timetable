@@ -119,21 +119,41 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// Build "via A, B, C" from the stops array, showing ONLY the stops that
-// come AFTER the timetable station in the train's direction of travel.
-// Stops the train has ALREADY called at (before our station) are never
-// included — this is a hard contract, not a best-effort.
+// Returns true iff iRail marked this stop as already arrived at. Handles
+// both number ("arrived": 1) and string ("arrived": "1") encodings that
+// have been observed in /vehicle/ responses across the years.
+static bool stop_already_arrived(const cJSON *stop)
+{
+    if (!stop) return false;
+    const cJSON *j = cJSON_GetObjectItemCaseSensitive(stop, "arrived");
+    if (!j) return false;
+    if (cJSON_IsNumber(j))   return j->valueint != 0;
+    if (cJSON_IsString(j) && j->valuestring) {
+        return j->valuestring[0] == '1';
+    }
+    return false;
+}
+
+// Build "via A, B, C" from the stops array. The two board flavours produce
+// different lists:
 //
-// For departures the final destination (terminus) is excluded because the
-// row's yellow label already shows it. For arrivals (include_terminus ==
-// true) the terminus IS appended as the last stop, since the arrival row's
-// yellow label shows the ORIGIN instead.
+// DEPARTURES (include_terminus == false):
+//   Stops that come AFTER our station in the train's direction of travel,
+//   excluding the terminus (already shown as the row's yellow label).
+//   Stops the train has already called at are never included.
 //
-// Matching the user's station inside the route is done by canonical
-// iRail ID (`stationinfo.id`) when available — it's language-independent.
-// Falls back to a case-sensitive name match if no ID was captured yet.
-// If neither yields a match, the function returns an empty via string
-// (a deliberately empty line beats showing already-visited stops).
+// ARRIVALS (include_terminus == true):
+//   Every stop the train STILL HAS to call at — starting from the first
+//   stop iRail hasn't marked `arrived=1`, through our station, through the
+//   stops after our station, ending at the terminus. The user gets the
+//   train's remaining future schedule, not just the post-our-station tail.
+//
+// Matching our station inside the route uses the canonical iRail
+// stationinfo.id (language-independent); falls back to a name match when
+// no ID is cached. If neither matches in DEPARTURES mode, the result is
+// empty — we'd rather show no via than risk leaking pre-our-station
+// stops. ARRIVALS mode doesn't need a match because it walks the whole
+// not-yet-arrived window.
 //
 // Long station names that wouldn't fit in out_len drop the partial stop
 // and everything after it; no ellipsis is ever written.
@@ -148,43 +168,56 @@ static void format_via_from_stops(const cJSON *stops_arr,
     int n = cJSON_GetArraySize(stops_arr);
     if (n < 2) return;   // need at least origin + terminus
 
-    const char *our_id = irail_active_station_id();
-    bool have_id = (our_id && our_id[0]);
+    int start = 0;
+    int end   = 0;
 
-    // Find our station's index in the route. Prefer ID match (canonical,
-    // language-independent); fall back to name match.
-    int origin_idx = -1;
-    for (int i = 0; i < n; i++) {
-        const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
-        if (!stop) continue;
-        if (have_id) {
-            const cJSON *si = cJSON_GetObjectItemCaseSensitive(stop, "stationinfo");
-            const cJSON *id_j = cJSON_IsObject(si)
-                ? cJSON_GetObjectItemCaseSensitive(si, "id") : NULL;
-            if (cJSON_IsString(id_j) && id_j->valuestring &&
-                strcmp(id_j->valuestring, our_id) == 0) {
-                origin_idx = i;
-                break;
-            }
-        } else if (origin) {
-            const cJSON *station = cJSON_GetObjectItemCaseSensitive(stop, "station");
-            if (cJSON_IsString(station) && station->valuestring &&
-                strcmp(station->valuestring, origin) == 0) {
-                origin_idx = i;
+    if (include_terminus) {
+        // Arrivals: start from the first stop the train hasn't visited yet,
+        // include everything up to and including the terminus.
+        start = 0;
+        for (int i = 0; i < n; i++) {
+            if (stop_already_arrived(cJSON_GetArrayItem(stops_arr, i))) {
+                start = i + 1;
+            } else {
                 break;
             }
         }
+        end = n;
+    } else {
+        // Departures: find our station, emit only stops after it (exclude
+        // the terminus, which is already the row's yellow destination).
+        const char *our_id = irail_active_station_id();
+        bool have_id = (our_id && our_id[0]);
+
+        int origin_idx = -1;
+        for (int i = 0; i < n; i++) {
+            const cJSON *stop = cJSON_GetArrayItem(stops_arr, i);
+            if (!stop) continue;
+            if (have_id) {
+                const cJSON *si = cJSON_GetObjectItemCaseSensitive(stop, "stationinfo");
+                const cJSON *id_j = cJSON_IsObject(si)
+                    ? cJSON_GetObjectItemCaseSensitive(si, "id") : NULL;
+                if (cJSON_IsString(id_j) && id_j->valuestring &&
+                    strcmp(id_j->valuestring, our_id) == 0) {
+                    origin_idx = i;
+                    break;
+                }
+            } else if (origin) {
+                const cJSON *station = cJSON_GetObjectItemCaseSensitive(stop, "station");
+                if (cJSON_IsString(station) && station->valuestring &&
+                    strcmp(station->valuestring, origin) == 0) {
+                    origin_idx = i;
+                    break;
+                }
+            }
+        }
+        if (origin_idx < 0) return;   // strict: never leak pre-our stops
+
+        start = origin_idx + 1;
+        end   = n - 1;                // exclude terminus
     }
 
-    // Strict contract: if we don't know where our station sits in this
-    // route, we cannot safely tell which stops are "behind" the train and
-    // which are still to come — so emit nothing rather than risk showing
-    // stops the train has already called at.
-    if (origin_idx < 0) return;
-
-    int start = origin_idx + 1;
-    int end   = include_terminus ? n : n - 1;   // exclusive
-    if (start >= end) return;                   // we're at (or past) terminus
+    if (start >= end) return;
 
     bool started = false;
     size_t cursor = snprintf(out, out_len, "via ");
