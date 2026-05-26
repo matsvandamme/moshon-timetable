@@ -4,7 +4,7 @@
 
 // -------- Project-wide constants --------
 #define APP_NAME           "moshon-timetable"
-#define APP_VERSION        "0.2.0"
+#define APP_VERSION        "0.3.0"
 #define APP_DEVELOPER      "VMAT"
 #define APP_CONTACT_EMAIL  "matthieu@vmat-contracting.be"
 #define APP_HOMEPAGE       "https://github.com/matsvandamme/moshon-timetable"

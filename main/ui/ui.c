@@ -747,9 +747,12 @@ esp_err_t ui_build(void)
     lv_obj_set_width(s_overlay_info, LCD_H_RES - 20);
     {
         char info[256];
+        // ASCII-only — Montserrat 14 doesn't have U+00B7 middle dot or
+        // U+2022 bullet glyphs in its default range, which renders as the
+        // dreaded white-outlined square.
         snprintf(info, sizeof(info),
                  "%s v%s\n"
-                 "build %s %s  \xC2\xB7  ESP-IDF " IDF_VER "\n"
+                 "build %s %s  |  ESP-IDF " IDF_VER "\n"
                  "by %s\n"
                  "%s",
                  APP_NAME, APP_VERSION,

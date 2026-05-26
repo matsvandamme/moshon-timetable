@@ -10,6 +10,7 @@
 #include "provision_ap.h"
 #include "cfg.h"
 #include "app_config.h"
+#include "stations_be.h"
 
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -44,28 +45,9 @@ static const char *TAG = "prov";
 static httpd_handle_t s_httpd = NULL;
 
 // -------------------------------------------------------------------
-// Stations dropdown — keep in sync with stations.c. Kept inline to
-// avoid coupling the provisioning module to the rest of the project.
-// -------------------------------------------------------------------
-static const char *const STATION_OPTIONS[] = {
-    "Aalter",
-    "Brussels-South",
-    "Brussels-Central",
-    "Brussels-North",
-    "Antwerpen-Centraal",
-    "Gent-Sint-Pieters",
-    "Brugge",
-    "Oostende",
-    "Leuven",
-    "Liege-Guillemins",
-    "Namur",
-    "Charleroi-Sud",
-};
-#define N_STATION_OPTIONS  (sizeof(STATION_OPTIONS) / sizeof(STATION_OPTIONS[0]))
-
-// -------------------------------------------------------------------
 // HTML page — split so we can stream it chunk-by-chunk and inject the
-// station <option>s in the middle without one giant static string.
+// full Belgian-stations datalist (~21 KB, see stations_be.c) in the
+// middle without one giant static string.
 // -------------------------------------------------------------------
 static const char HTML_HEAD[] =
     "<!DOCTYPE html><html lang=\"en\"><head>"
@@ -99,17 +81,16 @@ static const char HTML_HEAD[] =
     "<label>Wi-Fi password"
     "<input name=\"pass\" type=\"password\" autocomplete=\"new-password\""
     " maxlength=\"63\"></label>"
-    "<label>Station"
-    "<select name=\"station\" required>";
-
-static const char HTML_TAIL[] =
-    "<option value=\"__custom__\">\xE2\x80\x94 custom name below \xE2\x80\x94</option>"
-    "</select></label>"
-    "<label>Custom station name (only if you picked the custom option above)"
-    "<input name=\"custom\" type=\"text\" autocomplete=\"off\""
-    " spellcheck=\"false\" maxlength=\"48\"></label>"
+    "<label>Station (type to search)"
+    "<input name=\"station\" list=\"be_stations\" type=\"text\""
+    " autocomplete=\"off\" autocapitalize=\"words\" spellcheck=\"false\""
+    " required maxlength=\"48\"></label>"
     "<button type=\"submit\">Save and restart</button>"
     "</form>"
+    "<datalist id=\"be_stations\">";
+
+static const char HTML_TAIL[] =
+    "</datalist>"
     "<p class=\"foot\">moshon-timetable v" APP_VERSION " \xE2\x80\xA2 by " APP_DEVELOPER "</p>"
     "</body></html>";
 
@@ -151,13 +132,10 @@ static esp_err_t serve_setup_form(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
     httpd_resp_send_chunk(req, HTML_HEAD, HTTPD_RESP_USE_STRLEN);
-    for (size_t i = 0; i < N_STATION_OPTIONS; i++) {
-        char opt[128];
-        int n = snprintf(opt, sizeof(opt),
-                         "<option value=\"%s\">%s</option>",
-                         STATION_OPTIONS[i], STATION_OPTIONS[i]);
-        httpd_resp_send_chunk(req, opt, n);
-    }
+    // All ~714 Belgian stations as pre-rendered <option> tags. Streamed
+    // in one big chunk; total payload is ~20 KB.
+    httpd_resp_send_chunk(req, STATIONS_BE_HTML_OPTIONS,
+                          STATIONS_BE_HTML_OPTIONS_LEN);
     httpd_resp_send_chunk(req, HTML_TAIL, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -188,25 +166,21 @@ static esp_err_t save_post(httpd_req_t *req)
     char ssid[CFG_FIELD_MAX]    = {0};
     char pass[CFG_FIELD_MAX]    = {0};
     char station[CFG_FIELD_MAX] = {0};
-    char custom[CFG_FIELD_MAX]  = {0};
 
     httpd_query_key_value(body, "ssid",    ssid,    sizeof(ssid));
     httpd_query_key_value(body, "pass",    pass,    sizeof(pass));
     httpd_query_key_value(body, "station", station, sizeof(station));
-    httpd_query_key_value(body, "custom",  custom,  sizeof(custom));
     url_decode_inplace(ssid);
     url_decode_inplace(pass);
     url_decode_inplace(station);
-    url_decode_inplace(custom);
 
     if (ssid[0]) {
         cfg_save_wifi(ssid, pass);
     }
-    // If "custom" was picked AND text supplied, prefer that.
-    const char *station_to_save =
-        (strcmp(station, "__custom__") == 0 && custom[0]) ? custom : station;
-    if (station_to_save[0]) {
-        cfg_save_station(station_to_save);
+    // datalist input accepts both autocompleted picks AND arbitrary text,
+    // so whatever ended up in `station` is what the user wants.
+    if (station[0]) {
+        cfg_save_station(station);
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");

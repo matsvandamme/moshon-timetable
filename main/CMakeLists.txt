@@ -9,6 +9,7 @@ idf_component_register(
         "net/irail.c"
         "net/irail_vehicle.c"
         "net/provision_ap.c"
+        "stations_be.c"
         "ui/ui.c"
         "assets/nmbs_logo.c"
     INCLUDE_DIRS
