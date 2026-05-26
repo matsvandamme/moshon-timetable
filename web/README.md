@@ -71,8 +71,6 @@ Pages routes:
 
 SPA fallback (so `/aalter` and friends route to `index.html`) is
 declared in `wrangler.toml`'s `not_found_handling = "single-page-application"`.
-The legacy `_redirects` file is retained for any future migration back to
-Pages-style hosting; both Pages and Workers Assets accept it.
 
 ## File layout
 
@@ -83,7 +81,6 @@ web/
 │   ├── style.css        NMBS palette + responsive layout
 │   ├── app.js           router, iRail client, render loop
 │   ├── icon.svg         favicon (B-in-oval)
-│   ├── _redirects       SPA fallback for Cloudflare Pages
 │   └── _headers         security + cache headers
 └── README.md
 ```
