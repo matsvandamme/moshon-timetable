@@ -75,6 +75,10 @@ CONFIG_LV_COLOR_DEPTH_16=y
 # --- Moshon Timetable defaults (see main/Kconfig.projbuild) ---
 CONFIG_STATION_AALTER=y
 CONFIG_REFRESH_PERIOD_SECONDS=45
+# Production mode by default. Set to =y in your local sdkconfig (or via
+# `idf.py menuconfig` -> Moshon Timetable -> Demo mode) for offline UI work
+# with synthetic boards instead of live iRail data. NEVER commit =y here.
+# CONFIG_DEMO_MODE is not set
 
 # --- LVGL allocator: route via libc malloc -> ESP-IDF heap (incl. PSRAM)
 # instead of LVGL's static 64KB TLSF pool. With FULL render mode + the
